@@ -432,235 +432,25 @@ struct Map {
 }
 
 impl Map {
-    fn initialize_default_timing_group(&mut self) {
-        // adds the default timing group to timing_groups
-        self.timing_groups.insert(
-            DEFAULT_TIMING_GROUP_ID.to_string(),
-            TimingGroup {
-                initial_scroll_velocity: self.initial_scroll_velocity, // set init sv
-                scroll_velocities: self.scroll_velocities.clone(), // copy svs
-                scroll_speed_factors: self.scroll_speed_factors.clone(), // copy ssfs
-                color_rgb: None,
-                current_track_position: 0,
-                current_ssf_factor: 1.0,
-                scroll_speed: 0.0,
-            },
-        );
-
-        // set every hitobject whose timing group is null to the default group
-        for hit_object in &mut self.hit_objects {
-            if hit_object.timing_group.is_none() {
-                hit_object.timing_group = Some(DEFAULT_TIMING_GROUP_ID.to_string());
-            }
-        }
-
-        // ! removing from main map for debug
-        self.scroll_velocities.clear();
-        self.scroll_speed_factors.clear();
-    }
-
-    fn initialize_control_points(&mut self) {
-        // set cumulative positions for SV points
-        for timing_group in self.timing_groups.values_mut() {
-            if timing_group.scroll_velocities.is_empty() {
-                continue; // no SVs, nothing to set
-            }
-
-            // start with first SV point (position = time * sv)
-            let mut position = (timing_group.scroll_velocities[0].start_time
-                * timing_group.initial_scroll_velocity
-                * TRACK_ROUNDING) as i64;
-            timing_group.scroll_velocities[0].cumulative_position = position;
-
-            // loop through SV indexes 1 to SVs-1 (rest of SVs)
-            for index in 1..timing_group.scroll_velocities.len() {
-                let current_sv = &timing_group.scroll_velocities[index];
-                let previous_sv = &timing_group.scroll_velocities[index - 1];
-
-                // we are computing up to current SV's point, so we use the previous SV's multiplier
-                let multiplier = previous_sv.multiplier;
-
-                // distance between last and current SV, times the previous SV's multiplier
-                let distance = (current_sv.start_time - previous_sv.start_time) * multiplier;
-
-                position += (distance * TRACK_ROUNDING) as i64;
-                timing_group.scroll_velocities[index].cumulative_position = position;
-            }
-        }
-    }
-
-    fn initialize_hit_objects(&mut self, field_positions: &FieldPositions) {
-        // initialize the hit objects
-        // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L161
-        for hit_object in &mut self.hit_objects {
-            let timing_group = self
-                .timing_groups
-                .get_mut(hit_object.timing_group.as_ref().unwrap())
-                .unwrap();
-
-            hit_object.initial_track_position = timing_group.get_position_from_time(
-                hit_object.start_time as f64,
-            ) as f32;
-
-            hit_object.hit_position = if hit_object.end_time.is_some() {
-                // LN
-                field_positions.hold_end_hit_position_y
-            } else {
-                field_positions.hit_position_y
-            };
-            hit_object.hold_end_hit_position = field_positions.hold_end_hit_position_y;
-        }
-    }
-
-    fn initialize_timing_lines(&mut self) {
-        // creates timing lines based on timing points' signatures and BPMs
-        self.timing_lines.clear();
-
-        // loop through timing points
-        for tp_index in 0..self.timing_points.len() {
-            // no timing lines if hidden
-            if self.timing_points[tp_index].hidden {
-                continue;
-            }
-
-            // the "current time" that will be incrementing)
-            let mut current_time = self.timing_points[tp_index].start_time;
-            let mut end_time = if tp_index + 1 < self.timing_points.len() {
-                // this isn't the last timing point
-                // end 1ms earlier to avoid possible timing line overlap
-                self.timing_points[tp_index + 1].start_time - 1.0
-            } else {
-                // last timing point, end at map length
-                self.length as f32
-            };
-
-            // time signature (3/4 or 4/4)
-            let signature = self.timing_points[tp_index]
-                .time_signature
-                .as_ref()
-                .cloned()
-                .unwrap_or(TimeSignature::Quadruple) as u32 as f32;
-
-            // "max possible sane value for timing lines" - quaver devs
-            const MAX_BPM: f32 = 9999.0;
-            let ms_per_beat = 60000.0 / MAX_BPM.min(self.timing_points[tp_index].bpm.abs());
-            // how many ms between measures/timing lines
-            let ms_increment = signature * ms_per_beat;
-            if ms_increment <= 0.0 {
-                continue; // no increment, skip this timing point
-            }
-
-            while current_time < end_time {
-                // position for the timing line
-                let start_position = self.timing_groups
-                    .get(DEFAULT_TIMING_GROUP_ID)
-                    .unwrap()
-                    .get_position_from_time(current_time as f64);
-
-                // create and add new timing line
-                self.timing_lines.push(
-                    TimingLine {
-                        start_time: current_time,
-                        start_position: start_position,
-                        current_track_position: 0.0,
-                    }
-                );
-
-                // increment time for next timing line
-                current_time += ms_increment;
-            }
-        }
-    }
-
-    fn initialize_beat_snaps(&mut self) {
-        for hit_object in &mut self.hit_objects {
-            // get active timing point at hit object's start time
-            let timing_point = object_at_time(&self.timing_points, hit_object.start_time)
-                .unwrap_or(&self.timing_points[0]);
-
-            // get beat length (ms per beat)
-            let beat_length = 60000.0 / timing_point.bpm;
-            // calculate offset from timing point start time
-            let offset = hit_object.start_time - timing_point.start_time;
-
-            // calculate note's snap index
-            let index = (48.0 * offset / beat_length).round() as u32;
-
-
-            // defualt value; will be overwritten unless
-            // not snapped to 1/16 or less, snap to 1/48
-            hit_object.snap_index = 8;
-
-            // loop through beat snaps to find the correct one
-            for (i, snap_type) in BEAT_SNAPS.iter().enumerate() {
-                if index % snap_type.divisor == 0 {
-                    // snap to this color
-                    hit_object.snap_index = i;
-                    break;
-                }
-            }
-        }
-    }
-
-    fn sort(&mut self) {
-        // sort hit objects
-        sort_by_start_time(&mut self.hit_objects);
-
-        // sort timing points
-        sort_by_start_time(&mut self.timing_points);
-        
-        // sort scroll velocities
-        for timing_group in self.timing_groups.values_mut() {
-            sort_by_start_time(&mut timing_group.scroll_velocities);
-        }
-        
-        // sort scroll speed factors
-        for timing_group in self.timing_groups.values_mut() {
-            sort_by_start_time(&mut timing_group.scroll_speed_factors);
-        }
-    }
-
-    fn update_track_position(&mut self, time: f64) {
-        // update the current track position of 
-        // all hit objects in each timing group
+    fn update_current_track_position(&mut self, time: f64) {
+        // update the current position of all hit objects
         self.time = time;
         for timing_group in self.timing_groups.values_mut() {
-            timing_group.current_ssf_factor = timing_group.get_scroll_speed_factor_from_time(time);
-            timing_group.current_track_position = timing_group.get_position_from_time(time);
+            timing_group.update_current_track_position(time);
         }
     }
 
-    fn update_scroll_speed(&mut self) {
-        // updates the scroll speed of all timing groups
-        let speed = SKIN.scroll_speed;
-        let rate_scaling = 1.0
-            + (self.rate - 1.0)
-            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f32 / 100.0);
-        let adjusted_scroll_speed = (speed * rate_scaling).clamp(50.0, 1000.0);
-        let scaling_factor = 1920.0 / 1366.0; // quaver's scaling
-
-        let scroll_speed = (adjusted_scroll_speed / 10.0)
-            / (20.0 * self.rate)
-            * scaling_factor; // * base_to_virtual_ratio
-
-        for timing_group in self.timing_groups.values_mut() {
-            timing_group.update_scroll_speed(scroll_speed);
+    fn update_timing_lines(&mut self) {
+        // update the position of all timing lines
+        let timing_group = self
+            .timing_groups
+            .get_mut(DEFAULT_TIMING_GROUP_ID)
+            .unwrap();
+        let offset = timing_group.current_track_position;
+        for timing_line in &mut self.timing_lines {
+            timing_line.current_track_position = (offset - timing_line.track_offset) as f32;
         }
     }
-
-
-
-    // fn update_timing_lines(&mut self) {
-    //     // update the position of all timing lines
-    //     let timing_group = self
-    //         .timing_groups
-    //         .get_mut(DEFAULT_TIMING_GROUP_ID)
-    //         .unwrap();
-    //     let offset = timing_group.current_track_position;
-    //     for timing_line in &mut self.timing_lines {
-    //         timing_line.current_track_position = (offset - timing_line.track_offset) as f32;
-    //     }
-    // }
 
     // fn update_hit_objects(&mut self, field_positions: &FieldPositions) {
     //     // update the position of all hit objects
@@ -679,20 +469,223 @@ impl Map {
     //     }
     // }
 
-    // fn get_key_count(&self, include_scratch: bool) -> i32 {
-    //     // returns the number of keys in the map
-    //     let mut key_count = match self.mode.as_str() {
-    //         "Keys4" => 4,
-    //         "Keys7" => 7,
-    //         _ => panic!("Invalid game mode"),
-    //     };
+    fn initialize_scroll_speed(&mut self) {
+        // initialize the scroll speed of all timing groups
+        for timing_group in self.timing_groups.values_mut() {
+            timing_group.initialize_scroll_speed(self.rate);
+        }
+    }
 
-    //     if self.has_scratch_key && include_scratch {
-    //         key_count += 1;
-    //     }
+    fn initialize_hit_objects(&mut self, field_positions: &FieldPositions) {
+        // initialize the hit objects
+        // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L161
+        for hit_object in &mut self.hit_objects {
+            let timing_group = self
+                .timing_groups
+                .get_mut(hit_object.timing_group.as_ref().unwrap())
+                .unwrap();
 
-    //     key_count
-    // }
+            hit_object.initial_track_position = timing_group.get_position_from_time(
+                hit_object.start_time as f64,
+                index_at_time(&self.scroll_velocities, hit_object.start_time)
+            ) as f32;
+
+            hit_object.hit_position = if hit_object.end_time.is_some() {
+                // LN
+                field_positions.hold_end_hit_position_y
+            } else {
+                field_positions.hit_position_y
+            };
+            hit_object.hold_end_hit_position = field_positions.hold_end_hit_position_y;
+        }
+    }
+
+    fn update_scroll_speed(&mut self) {
+        // updates the scroll speed of all timing groups
+        for timing_group in self.timing_groups.values_mut() {
+            timing_group.update_scroll_speed(self.rate);
+        }
+    }
+
+    fn initialize_position_markers(&mut self) {
+        // initialize the position markers for all hit objects
+        for timing_group in self.timing_groups.values_mut() {
+            timing_group.initialize_position_markers();
+        }
+    }
+
+    fn initialize_timing_lines(&mut self) {
+        // initialize the timing lines
+        self.timing_lines.clear();
+        for tp_index in 0..self.timing_points.len() {
+            if self.timing_points[tp_index].hidden {
+                continue;
+            }
+
+            let mut end_target: f32; // end time of the timing line
+
+            // set the end to 1ms before the next timing point to avoid possible timing line overlap
+            let end_target = if tp_index + 1 < self.timing_points.len() {
+                self.timing_points[tp_index + 1].start_time - 1.0
+            } else {
+                self.length as f32
+            };
+
+
+            let signature = self.timing_points[tp_index]
+                .time_signature
+                .as_ref()
+                .cloned()
+                .unwrap_or(TimeSignature::Quadruple) as u32 as f32;
+
+            // "max possible sane value for timing lines"
+            const MAX_BPM: f32 = 9999.0;
+
+            let ms_per_beat = 60000.0 / MAX_BPM.min(self.timing_points[tp_index].bpm.abs());
+            let increment = signature * ms_per_beat; // how many ms between measures
+
+            if increment <= 0.0 {
+                continue;
+            }
+
+            // initialize timing lines between current current timing point and target position
+            let mut song_position = self.timing_points[tp_index].start_time;
+            while song_position < end_target {
+                let offset = self.timing_groups
+                    .get(DEFAULT_TIMING_GROUP_ID)
+                    .unwrap()
+                    .get_position_from_time(
+                        song_position as f64,
+                        index_at_time(
+                            &self.scroll_velocities,
+                            song_position
+                        )
+                    );
+
+                let timing_line = TimingLine {
+                    start_time: song_position,
+                    track_offset: offset,
+                    current_track_position: 0.0,
+                };
+
+                self.timing_lines.push(timing_line);
+
+                song_position += increment;
+            }
+        }
+    }
+
+    fn initialize_beat_snaps(&mut self) {
+        for hit_object in &mut self.hit_objects {
+            let timing_point = at_time(&self.timing_points, hit_object.start_time)
+                .unwrap_or(&self.timing_points[0]);
+
+            // get beat length
+            let beat_length = 60000.0 / timing_point.bpm;
+            let position = hit_object.start_time - timing_point.start_time;
+
+            // calculate note's snap index
+            let index = (48.0 * position / beat_length).round() as u32;
+
+
+            // defualt value; will be overwritten unless
+            // not snapped to 1/16 or less, snap to 1/48
+            hit_object.snap_index = 8;
+
+            for (i, snap_type) in BEAT_SNAPS.iter().enumerate() {
+                if index % snap_type.divisor == 0 {
+                    // snap to this color
+                    hit_object.snap_index = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn link_default_timing_group(&mut self) {
+        // links DefaultScrollGroup to TimingGroups so that
+        // TimingGroups[DefaultScrollGroupId] points to that group
+        self.timing_groups
+            .insert(DEFAULT_TIMING_GROUP_ID.to_string(), TimingGroup::default());
+
+        // copy over initial scroll velocity
+        self.timing_groups
+            .get_mut(DEFAULT_TIMING_GROUP_ID)
+            .unwrap().initial_scroll_velocity = self.initial_scroll_velocity;
+        // copy over SVs
+        self.timing_groups
+            .get_mut(DEFAULT_TIMING_GROUP_ID)
+            .unwrap()
+            .scroll_velocities = self.scroll_velocities.clone();
+        // copy over SSFs
+        self.timing_groups
+            .get_mut(DEFAULT_TIMING_GROUP_ID)
+            .unwrap()
+            .scroll_speed_factors = self.scroll_speed_factors.clone();
+
+        // Set every hitobject whose timing group is null to the default group
+        for hit_object in &mut self.hit_objects {
+            if hit_object.timing_group.is_none() {
+                hit_object.timing_group = Some(DEFAULT_TIMING_GROUP_ID.to_string());
+            }
+        }
+
+        // ! removing from main map for debug
+        self.scroll_velocities.clear();
+        self.scroll_speed_factors.clear();
+    }
+
+    fn get_timing_point_at(&self, time: f32) -> Option<&TimingPoint> {
+        // gets the timing point at a particular time in the map
+        if self.timing_points.is_empty() {
+            return None;
+        }
+
+        Some(at_time(self.timing_points.as_slice(), time).unwrap_or(&self.timing_points[0]))
+    }
+
+    fn get_key_count(&self, include_scratch: bool) -> i32 {
+        // returns the number of keys in the map
+        let mut key_count = match self.mode.as_str() {
+            "Keys4" => 4,
+            "Keys7" => 7,
+            _ => panic!("Invalid game mode"),
+        };
+
+        if self.has_scratch_key && include_scratch {
+            key_count += 1;
+        }
+
+        key_count
+    }
+
+    fn sort_scroll_velocities(&mut self) {
+        for timing_group in self.timing_groups.values_mut() {
+            sort_by_start_time(&mut timing_group.scroll_velocities);
+        }
+    }
+
+    fn sort_scroll_speed_factors(&mut self) {
+        for timing_group in self.timing_groups.values_mut() {
+            sort_by_start_time(&mut timing_group.scroll_speed_factors);
+        }
+    }
+
+    fn sort_hit_objects(&mut self) {
+        sort_by_start_time(&mut self.hit_objects);
+    }
+
+    fn sort_timing_points(&mut self) {
+        // sort_by_start_time(&mut self.timing_points);
+        self.timing_points.sort_by(|a, b| a.start_time().partial_cmp(&b.start_time()).unwrap());
+    }
+
+    fn sort(&mut self) {
+        self.sort_hit_objects();
+        self.sort_timing_points();
+        self.sort_scroll_velocities();
+        self.sort_scroll_speed_factors();
+    }
 
 }
 
@@ -706,7 +699,7 @@ struct TimingLine {
     #[serde(default)]
     start_time: f32, // time when the timing line reaches the receptor
     #[serde(default)]
-    start_position: i64, // the timing line's position offset on track
+    track_offset: i64, // the timing line's y offset from the receptor; target position when track position = 0
     #[serde(default)]
     current_track_position: f32, // track position; >0 = hasnt passed receptors
 }
@@ -751,7 +744,9 @@ struct ControlPoint {
     #[serde(skip_deserializing)]
     length: Option<f32>, // none if last point
     #[serde(skip_deserializing)]
-    cumulative_position: i64, // cumulative distance from the start of the map
+    effective_length: Option<f32>, // none if last point
+    #[serde(skip_deserializing)]
+    position_marker: i64, // cumulative distance from the start of the map
 }
 
 impl HasStartTime for ControlPoint {
@@ -820,68 +815,66 @@ struct TimingGroup {
     // info for playback
     #[serde(skip)]
     current_track_position: i64, // current playback position
+    #[serde(skip)]
+    current_sv_index: Option<usize>, // index of current SV point
+    #[serde(skip)]
+    current_ssf_index: Option<usize>, // index of current SSF point
     #[serde(default = "one_f32")]
     current_ssf_factor: f32, // current SSF multiplier
+    #[serde(skip)]
+    adjusted_scroll_speed: f32,
     #[serde(skip)]
     scroll_speed: f32, // speed at which objects travel across the screen
 }
 
 impl TimingGroup {
-    fn get_scroll_speed_factor_from_time(&self, time: f64) -> f32 {
-        // gets the SSF multiplier at a time, with linear interpolation
-        let ssf_index = index_at_time(&self.scroll_speed_factors, time as f32);
- 
-        match ssf_index {
-            None => {
-                // before first SSF point or no SSFs, so no effect applied
-                return 1.0;
-            }
-            Some(index) => {
-                let ssf = &self.scroll_speed_factors[index];
-                if index == self.scroll_speed_factors.len() - 1 {
-                    // last point, no interpolation
-                    return ssf.multiplier;
-                }
+    fn initialize_position_markers(&mut self) {
+        // calculates the timing group's track position at each SV point
+        if self.scroll_velocities.is_empty() {
+            // no SVs, nothing to set
+            return;
+        }
 
-                let next_ssf = &self.scroll_speed_factors[index + 1];
-                // lerp between this and next point based on time between
-                return lerp(
-                    ssf.multiplier,
-                    next_ssf.multiplier,
-                    ((time as f32 - ssf.start_time) / (next_ssf.start_time - ssf.start_time))
-                )
-            }
+        // start with first SV point
+        let mut position = (self.scroll_velocities[0].start_time
+            * self.initial_scroll_velocity
+            * TRACK_ROUNDING) as i64;
+        self.scroll_velocities[0].position_marker = position;
+
+        // loop through SV indexes 1 to SVs-1 (rest of SVs)
+        for index in 1..self.scroll_velocities.len() {
+            let current_sv = &self.scroll_velocities[index];
+            let previous_sv = &self.scroll_velocities[index - 1];
+            // we are computing up to current SV's point, so we use the previous SV's multiplier
+            let multiplier = previous_sv.multiplier;
+            // distance between last and current SV, times the previous SV's multiplier
+            let distance = (current_sv.start_time - previous_sv.start_time) * multiplier;
+
+            position += (distance * TRACK_ROUNDING) as i64;
+            self.scroll_velocities[index].position_marker = position;
         }
     }
 
-    fn get_position_from_time(&self, time: f64) -> i64 {
-        // calculates the timing group's track position with time and SV
-        let sv_index = index_at_time(&self.scroll_velocities, time as f32);
-
-        match sv_index {
-            None => {
-                // before first SV point or no SVs, so use initial scroll velocity
-                return (time as f32
-                    * self.initial_scroll_velocity
-                    * TRACK_ROUNDING
-                ) as i64;
-            }
-            Some(index) => {
-                // get the track position at the start of the current SV point
-                let mut current_position = self.scroll_velocities[index].cumulative_position;
-
-                // add the distance between the start of the current SV point and the time
-                current_position += ((time as f32 - self.scroll_velocities[index].start_time)
-                    * self.scroll_velocities[index].multiplier
-                    * TRACK_ROUNDING) as i64;
-                return current_position;
-            }
-        }
+    fn initialize_scroll_speed(&mut self, rate: f32) {
+        // initialize the scroll speed of this timing group; gets re-called on rate change
+        // set adjusted scroll speed
+        let speed = SKIN.scroll_speed;
+        let rate_scaling = 1.0
+            + (rate - 1.0)
+            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f32 / 100.0);
+        self.adjusted_scroll_speed = (speed * rate_scaling).clamp(50.0, 1000.0);
+        
+        // set scroll speed
+        self.update_scroll_speed(rate);
     }
 
-    fn update_scroll_speed(&mut self, scroll_speed: f32) {
+    fn update_scroll_speed(&mut self, rate: f32) {
         // update scroll speed with ssf factor
-        self.scroll_speed = scroll_speed * self.current_ssf_factor;
+        let scaling_factor = 1920.0 / 1366.0; // quaver's scaling
+        self.scroll_speed = (self.adjusted_scroll_speed / 10.0)
+            / (20.0 * rate)
+            * scaling_factor
+            * self.current_ssf_factor; // * base_to_virtual_ratio
     }
 
     fn get_hit_object_position(&self, hit_position: f32, initial_position: f32) -> f32 {
@@ -899,7 +892,151 @@ impl TimingGroup {
         );
 
         return position;
+
     }
+
+    fn get_scroll_speed_factor_from_time(&self, time: f64, mut ssf_index: Option<usize>) -> f32 {
+        // gets the SSF multiplier at a time, with linear interpolation
+        // uses index for optimization
+        if ssf_index.is_none() || self.scroll_speed_factors.is_empty() {
+            // before first SSF point, or no SSFs
+            return 1.0;
+        }
+
+        let index = if ssf_index.unwrap() >= self.scroll_speed_factors.len() {
+            // somehow out of bounds, set to last SSF point
+            self.scroll_speed_factors.len() - 1
+        } else {
+            ssf_index.unwrap()
+        };
+
+        let ssf = &self.scroll_speed_factors[index];
+        if index == self.scroll_speed_factors.len() - 1 {
+            // last point, no interpolation
+            return ssf.multiplier;
+        }
+        
+        let next_ssf = &self.scroll_speed_factors[index + 1];
+        // linear interpolation between current and next SSF
+        return lerp(
+            ssf.multiplier,
+            next_ssf.multiplier,
+            ((time as f32 - ssf.start_time) / (next_ssf.start_time - ssf.start_time))
+        );
+    }
+
+    fn get_position_from_time(&self, time: f64, sv_index: Option<usize>) -> i64 {
+        // calculates the timing group's track position with time and SV
+        // uses index for optimization
+        if sv_index.is_none() || self.scroll_velocities.is_empty() {
+            // before first sv point
+            return (time as f32 * self.initial_scroll_velocity * TRACK_ROUNDING) as i64;
+        }
+        let index = if sv_index.unwrap() >= self.scroll_velocities.len() {
+            // somehow out of bounds, set to last SV point
+            self.scroll_velocities.len() - 1
+        } else {
+            sv_index.unwrap()
+        };
+
+        // grab the track position at the start of the current SV point
+        let mut current_position = self.scroll_velocities[index].position_marker;
+
+        // add the distance between now and the start of the current SV point
+        current_position += ((time as f32 - self.scroll_velocities[index].start_time)
+            * self.scroll_velocities[index].multiplier
+            * TRACK_ROUNDING) as i64;
+        return current_position;
+    }
+
+    fn update_current_track_position(&mut self, time: f64) {
+        // updates the current track position of the timing group
+
+        // update SV index
+        loop {
+            if self.scroll_velocities.is_empty() {
+                // there are no SVs, indicate using initial scroll velocity by setting index to None
+                self.current_sv_index = None;
+                break;
+            }
+
+            if self.current_sv_index.is_none() {
+                // check if we are past the first SV point yet
+                if time > self.scroll_velocities[0].start_time as f64 {
+                    // start with first SV
+                    self.current_sv_index = Some(0);
+                } else {
+                    // set index to None to use initial scroll velocity
+                    self.current_sv_index = None;
+                    break;
+                }
+            }
+
+            // update the SV index if we aren't at the last SV point and
+            // the next SV point is past the current time
+            if self.current_sv_index.unwrap() < self.scroll_velocities.len() - 1
+                && time as f32 >= self.scroll_velocities[self.current_sv_index.unwrap() + 1].start_time 
+            {
+                self.current_sv_index = Some(self.current_sv_index.unwrap() + 1);
+            } else {
+                // SV index is up to date
+                break;
+            }
+        }
+
+        // update SSF index
+        loop {
+            if self.scroll_speed_factors.is_empty() {
+                // there are no SSFs
+                self.current_ssf_index = None;
+                break;
+            }
+
+            if self.current_ssf_index.is_none() {
+                // check if we are past the first SSF point yet
+                if time > self.scroll_speed_factors[0].start_time as f64 {
+                    // start with first SSF
+                    self.current_ssf_index = Some(0);
+                } else {
+                    // not past first SSF point
+                    self.current_ssf_index = None;
+                    break;
+                }
+            }
+
+            // update the SSF index if we aren't at the last SSF point and
+            // the next SSF point is past the current time
+            if self.current_ssf_index.unwrap() < self.scroll_speed_factors.len() - 1
+                && time as f32 >= self.scroll_speed_factors[self.current_ssf_index.unwrap() + 1].start_time 
+            {
+                self.current_ssf_index = Some(self.current_ssf_index.unwrap() + 1);
+            } else {
+                // SSF index is up to date
+                break;
+            }
+        }
+
+        self.current_ssf_factor = self.get_scroll_speed_factor_from_time(time, self.current_ssf_index);
+        self.current_track_position = self.get_position_from_time(time, self.current_sv_index);
+    }
+
+    fn in_range(&self, hit_object: &HitObject) -> bool {
+        // checks if the hit object is in rendering range of the timing group
+        match hit_object.end_time{
+            Some(end_time) => {
+                // LN logic
+                if self.scroll_velocities.is_empty() {
+                    return hit_object.start_time >= self.scroll_velocities[0].start_time && end_time <= self.scroll_velocities[self.scroll_velocities.len() - 1].start_time;
+                }
+                return hit_object.start_time >= self.scroll_velocities[0].start_time && end_time <= self.scroll_velocities[self.scroll_velocities.len() - 1].start_time;
+            }
+            None => {
+                // normal hit object logic
+                return hit_object.start_time >= self.scroll_velocities[0].start_time && hit_object.start_time <= self.scroll_velocities[self.scroll_velocities.len() - 1].start_time;
+            }
+        }
+    }
+
 }
 
 impl Default for TimingGroup {
@@ -910,7 +1047,10 @@ impl Default for TimingGroup {
             scroll_speed_factors: Vec::new(),
             color_rgb: None,
             current_track_position: 0,
+            current_sv_index: None,
+            current_ssf_index: None,
             current_ssf_factor: 1.0,
+            adjusted_scroll_speed: 0.0,
             scroll_speed: 0.0,
         }
     }
@@ -1017,7 +1157,7 @@ fn index_at_time<T: HasStartTime>(list: &[T], time: f32) -> Option<usize> {
 }
 
 // returns currently active item (start_time <= time)
-fn object_at_time<T: HasStartTime>(list: &[T], time: f32) -> Option<&T> {
+fn at_time<T: HasStartTime>(list: &[T], time: f32) -> Option<&T> {
     index_at_time(list, time).map(|i| &list[i])
 }
 
@@ -1123,10 +1263,10 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     // calculates the positions of all objects and renders the current frame given the framestate
 
 
-    // state.map.update_current_track_position(state.map.time);
-    // state.map.update_scroll_speed();
+    state.map.update_current_track_position(state.map.time);
+    state.map.update_scroll_speed();
     // state.map.update_hit_objects(state.field_positions);
-    // state.map.update_timing_lines();
+    state.map.update_timing_lines();
 
     // reference/base screen size
     let base_height = 1440.0;
@@ -1165,44 +1305,44 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     let line_thickness = 1.0;
 
     // timing lines
-    // for timing_line in &state.map.timing_lines {
-    //     let timing_group = state.map.timing_groups.get(DEFAULT_TIMING_GROUP_ID).unwrap();
+    for timing_line in &state.map.timing_lines {
+        let timing_group = state.map.timing_groups.get(DEFAULT_TIMING_GROUP_ID).unwrap();
 
-    //     // let sv_index = index_at_time(&timing_group.scroll_velocities, timing_line.start_time);
-    //     // let track_position = timing_group.get_position_from_time(timing_line.start_time as f64, sv_index);
+        // let sv_index = index_at_time(&timing_group.scroll_velocities, timing_line.start_time);
+        // let track_position = timing_group.get_position_from_time(timing_line.start_time as f64, sv_index);
 
-    //     // // how far in track units from the receptor (current time)
-    //     // let delta_track = track_position - timing_group.current_track_position;
+        // // how far in track units from the receptor (current time)
+        // let delta_track = track_position - timing_group.current_track_position;
 
-    //     // let pixels_per_effective_ms = scroll_speed / 1000.0;
-    //     // let pixel_offset_from_receptor = delta_track as f32 * pixels_per_effective_ms;
-    //     // let timing_line_y = (window_height - HIT_LINE_Y_POS_PX) - pixel_offset_from_receptor;
+        // let pixels_per_effective_ms = scroll_speed / 1000.0;
+        // let pixel_offset_from_receptor = delta_track as f32 * pixels_per_effective_ms;
+        // let timing_line_y = (window_height - HIT_LINE_Y_POS_PX) - pixel_offset_from_receptor;
 
 
-    //     // Y = TrackOffset + (CurrentTrackPosition * (ScrollDirection.Equals(ScrollDirection.Down) ? globalGroupController.ScrollSpeed : -globalGroupController.ScrollSpeed) / HitObjectManagerKeys.TrackRounding);
-    //     let ss = timing_group.scroll_speed * timing_group.current_ssf_factor;
-    //     let timing_line_y = (timing_line.track_offset as f32)
-    //         + (timing_line.current_track_position as f32 * 
-    //             (if SKIN.downscroll {ss} else {-ss}) / TRACK_ROUNDING
-    //         );
+        // Y = TrackOffset + (CurrentTrackPosition * (ScrollDirection.Equals(ScrollDirection.Down) ? globalGroupController.ScrollSpeed : -globalGroupController.ScrollSpeed) / HitObjectManagerKeys.TrackRounding);
+        let ss = timing_group.scroll_speed * timing_group.current_ssf_factor;
+        let timing_line_y = (timing_line.track_offset as f32)
+            + (timing_line.current_track_position as f32 * 
+                (if SKIN.downscroll {ss} else {-ss}) / TRACK_ROUNDING
+            );
 
-    //     draw.draw_line(
-    //         if SKIN.wide_timing_lines {
-    //             0.0
-    //         } else {
-    //             playfield_x
-    //         },
-    //         timing_line_y,
-    //         if SKIN.wide_timing_lines {
-    //             window_width
-    //         } else {
-    //             playfield_x + (num_lanes as f32 * SKIN.lane_width)
-    //         },
-    //         timing_line_y,
-    //         line_thickness,
-    //         line_color,
-    //     );
-    // }
+        draw.draw_line(
+            if SKIN.wide_timing_lines {
+                0.0
+            } else {
+                playfield_x
+            },
+            timing_line_y,
+            if SKIN.wide_timing_lines {
+                window_width
+            } else {
+                playfield_x + (num_lanes as f32 * SKIN.lane_width)
+            },
+            timing_line_y,
+            line_thickness,
+            line_color,
+        );
+    }
 
     // notes
     for index in 0..state.map.hit_objects.len() {
@@ -1229,12 +1369,10 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
         //                        : ScrollGroupController.ScrollSpeed)
         //                    / HitObjectManagerKeys.TrackRounding);
 
-        // let note_y = timing_group.get_hit_object_position(
-        //     note.hit_position,
-        //     note.initial_track_position
-        // );
-
-        let note_y = note.start_time - state.map.time as f32;
+        let note_y = timing_group.get_hit_object_position(
+            note.hit_position,
+            note.initial_track_position
+        );
 
         // let sv_index = index_at_time(&timing_group.scroll_velocities, note.start_time);
         // let note_track_position = timing_group.get_position_from_time(note.start_time as f64, sv_index);
@@ -1312,7 +1450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- map loading ---
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let map_folder_path = project_dir.join("songs/snuffy");
+    let map_folder_path = project_dir.join("songs/femboymusic");
     let map_file_name_option = fs::read_dir(&map_folder_path)
         .map_err(|e| format!("Failed to read map directory {:?}: {}", map_folder_path, e))?
         .filter_map(Result::ok)
@@ -1362,11 +1500,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let field_positions = set_reference_positions();
     map.link_default_timing_group();
     map.sort();
-    // map.initialize_position_markers();
-    // map.initialize_timing_lines();
+    map.initialize_position_markers();
+    map.initialize_timing_lines();
     map.initialize_beat_snaps();
     map.initialize_scroll_speed();
-    // map.initialize_hit_objects(&field_positions);
+    map.initialize_hit_objects(&field_positions);
 
     let total_svs = map.timing_groups.values().map(|g| g.scroll_velocities.len()).sum::<usize>();
     let total_ssfs = map.timing_groups.values().map(|g| g.scroll_speed_factors.len()).sum::<usize>();
