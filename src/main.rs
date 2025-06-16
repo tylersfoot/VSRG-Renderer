@@ -18,7 +18,7 @@ const GLOBAL_TIMING_GROUP_ID: &str = "$Global";
 const INITIAL_AUDIO_VOLUME: f32 = 0.05;
 const INITIAL_AUDIO_RATE: f32 = 1.0;
 const SNAP_EPSILON: f32 = 0.01; // tolerance for float comparisons
-const TRACK_ROUNDING: f32 = 1.0; // rounding for track positions, for int/float conversion
+const TRACK_ROUNDING: f32 = 10.0; // rounding for track positions, for int/float conversion
 
 struct AudioManager {
     _stream: OutputStream,
@@ -498,7 +498,7 @@ impl Map {
                 .get_mut(hit_object.timing_group.as_ref().unwrap())
                 .unwrap();
 
-            hit_object.initial_track_position = timing_group.get_position_from_time(
+            hit_object.start_position = timing_group.get_position_from_time(
                 hit_object.start_time as f64,
             ) as f32;
 
@@ -621,8 +621,7 @@ impl Map {
     }
 
     fn update_track_position(&mut self, time: f64) {
-        // update the current track position of 
-        // all hit objects in each timing group
+        // update current track position of hit objects in each timing group
         self.time = time;
         for timing_group in self.timing_groups.values_mut() {
             timing_group.current_ssf_factor = timing_group.get_scroll_speed_factor_from_time(time);
@@ -648,51 +647,44 @@ impl Map {
         }
     }
 
+    fn update_timing_lines(&mut self) {
+        // updates the position of all timing lines
+        let timing_group = self
+            .timing_groups
+            .get_mut(DEFAULT_TIMING_GROUP_ID)
+            .unwrap();
+        for timing_line in &mut self.timing_lines {
+            timing_line.current_track_position = (timing_group.current_track_position - timing_line.start_position) as f32;
+        }
+    }
 
+    fn update_hit_objects(&mut self) {
+        // update the position of all hit objects
+        // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L387
+        for hit_object in &mut self.hit_objects {
+            let timing_group = self
+                .timing_groups
+                .get_mut(hit_object.timing_group.as_ref().unwrap())
+                .unwrap();
 
-    // fn update_timing_lines(&mut self) {
-    //     // update the position of all timing lines
-    //     let timing_group = self
-    //         .timing_groups
-    //         .get_mut(DEFAULT_TIMING_GROUP_ID)
-    //         .unwrap();
-    //     let offset = timing_group.current_track_position;
-    //     for timing_line in &mut self.timing_lines {
-    //         timing_line.current_track_position = (offset - timing_line.track_offset) as f32;
-    //     }
-    // }
+            hit_object.position = timing_group.get_hit_object_position(hit_object.hit_position, hit_object.start_position)
+        }
+    }
 
-    // fn update_hit_objects(&mut self, field_positions: &FieldPositions) {
-    //     // update the position of all hit objects
-    //     // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L387
-    //     for hit_object in &mut self.hit_objects {
-    //         let timing_group = self
-    //             .timing_groups
-    //             .get_mut(hit_object.timing_group.as_ref().unwrap())
-    //             .unwrap();
-    //         let mut position = 0.0;
+    fn get_key_count(&self, include_scratch: bool) -> i32 {
+        // returns the number of keys in the map
+        let mut key_count = match self.mode.as_str() {
+            "Keys4" => 4,
+            "Keys7" => 7,
+            _ => panic!("Invalid game mode"),
+        };
 
-    //         // update_long_note_size(map.time);
-    //         // if hit object held, logic
-    //         position = timing_group.get_hit_object_position(hit_object.hit_position, hit_object.initial_track_position)
-    //         // HitObjectSprite.Y = spritePosition;
-    //     }
-    // }
-
-    // fn get_key_count(&self, include_scratch: bool) -> i32 {
-    //     // returns the number of keys in the map
-    //     let mut key_count = match self.mode.as_str() {
-    //         "Keys4" => 4,
-    //         "Keys7" => 7,
-    //         _ => panic!("Invalid game mode"),
-    //     };
-
-    //     if self.has_scratch_key && include_scratch {
-    //         key_count += 1;
-    //     }
-
-    //     key_count
-    // }
+        if self.has_scratch_key && include_scratch {
+            return key_count + 1;
+        } else {
+            return key_count;
+        }
+    }
 
 }
 
@@ -773,20 +765,24 @@ struct HitObject {
     #[serde(deserialize_with = "deserialize_hit_sounds")]
     hit_sound: Vec<HitSounds>,
     timing_group: Option<String>,
-    #[serde(default)]
+    #[serde(skip)]
     removed: bool, // if object is out of range
-    #[serde(default)]
+    #[serde(skip)]
     snap_index: usize, // index for snap color
-    #[serde(default)]
-    hit_position: f32, // general position for hitting, calculated from hit body height and hit position offset
-    #[serde(default)]
+    #[serde(skip)]
     hold_end_hit_position: f32, // position for LN ends
-    #[serde(default)]
+    #[serde(skip)]
     current_long_note_body_size: f32, // current size of the LN body
-    #[serde(default)]
+    #[serde(skip)]
     scroll_direction: bool, // true for upscroll, false for downscroll
-    #[serde(default)]
-    initial_track_position: f32, // Y-offset from the origin
+    #[serde(skip)]
+    hit_position: f32, // where the note is "hit", calculated from hit body height and hit position offset
+    #[serde(skip)]
+    start_position: f32, // track position at start_time (in timing group)
+    #[serde(skip)]
+    position: f32, // live map position, calculated with timing group
+    #[serde(skip)]
+    previous_position: f32, // previous position, used for rendering effects
     
 }
 
@@ -886,15 +882,16 @@ impl TimingGroup {
 
     fn get_hit_object_position(&self, hit_position: f32, initial_position: f32) -> f32 {
         // calculates the position of a hit object with a position offset
-        let scroll_speed = if SKIN.downscroll { 
-                -self.scroll_speed 
-            } else { 
-                self.scroll_speed 
-            }; 
+        // note: signs were swapped in quaver?
+        // let scroll_speed = if SKIN.downscroll {
+        //     -self.scroll_speed
+        // } else {
+        //     self.scroll_speed
+        // };
 
         let position =  hit_position + (
             (initial_position - self.current_track_position as f32)
-            * scroll_speed 
+            * self.scroll_speed 
             / TRACK_ROUNDING
         );
 
@@ -1122,11 +1119,11 @@ impl Draw for MacroquadDraw {
 fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     // calculates the positions of all objects and renders the current frame given the framestate
 
-
-    // state.map.update_current_track_position(state.map.time);
-    // state.map.update_scroll_speed();
-    // state.map.update_hit_objects(state.field_positions);
-    // state.map.update_timing_lines();
+    // update functions
+    state.map.update_track_position(state.map.time);
+    state.map.update_scroll_speed();
+    state.map.update_timing_lines();
+    state.map.update_hit_objects();
 
     // reference/base screen size
     let base_height = 1440.0;
@@ -1149,15 +1146,6 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     let num_lanes = state.map.get_key_count(false);
     let playfield_width = num_lanes as f32 * SKIN.lane_width;
     let playfield_x = (window_width - playfield_width) / 2.0;
-    
-    let scroll_speed_px_per_second = SKIN.scroll_speed * 10.0 * (window_height / 1400.0);
-
-    // calculated scroll speed (still in px/s)
-    let mut scroll_speed = if SKIN.rate_affects_scroll_speed {
-        scroll_speed_px_per_second * state.map.rate
-    } else {
-        scroll_speed_px_per_second
-    };
 
     // PER TIMING GROUP: USE SCROLL SPEED * CURRENTSSF 
 
@@ -1206,46 +1194,13 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
 
     // notes
     for index in 0..state.map.hit_objects.len() {
-        let note = &mut state.map.hit_objects[index].clone();
-        let timing_group_id = &note.timing_group.clone().unwrap_or(DEFAULT_TIMING_GROUP_ID.to_string());
-        let timing_group = state.map.timing_groups.get(timing_group_id).unwrap();
-        // possibly change later
-        // if note.removed {
-        //     continue;
-        // }
+        // let note = &mut state.map.hit_objects[index].clone();
+        let note = &state.map.hit_objects[index];
+        let mut note_y = note.position;
 
-        // if note.start_time < state.map.time as f32 {
-        //     note.removed = true;
-        //     continue;
-        // }
-
-        // from Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/ScrollNoteController.cs
-        //     Calculates the position of the Hit Object with a position offset.
-        //
-        // public override float GetSpritePosition(float hitPosition, float initialPos) =>
-        //     hitPosition + ((initialPos - TimingGroupController.CurrentTrackPosition) *
-        //                    (ScrollDirection == ScrollDirection.Down
-        //                        ? -ScrollGroupController.ScrollSpeed
-        //                        : ScrollGroupController.ScrollSpeed)
-        //                    / HitObjectManagerKeys.TrackRounding);
-
-        // let note_y = timing_group.get_hit_object_position(
-        //     note.hit_position,
-        //     note.initial_track_position
-        // );
-
-        let note_y = note.start_time - state.map.time as f32;
-
-        // let sv_index = index_at_time(&timing_group.scroll_velocities, note.start_time);
-        // let note_track_position = timing_group.get_position_from_time(note.start_time as f64, sv_index);
-
-        // // how far in track units from the receptor (current time)
-        // let delta_track = note_track_position - timing_group.current_track_position;
-
-        // let pixels_per_effective_ms = scroll_speed / 1000.0;
-        // let pixel_offset_from_receptor = delta_track as f32 * pixels_per_effective_ms;
-        // // this is the bottom of the note
-        // let note_y = (window_height - SKIN.receptors_y_position) - pixel_offset_from_receptor;
+        note_y = -note_y;
+        // note_y = note_y + 630.0; // laptop
+        note_y = note_y + 920.0; // pc
 
         // calculate x position based on lane (1-indexed in quaver)
         // adjust lane to be 0-indexed for calculation
@@ -1263,16 +1218,17 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
         // snap colors
         let color = BEAT_SNAPS[note.snap_index].color;
 
-                // if past receptors
-        // let color = if note.start_time > state.time as f32 {
-        //     BEAT_SNAPS[note.snap_index].color
-        // } else {
-        //     macroquad::color::BLACK
-        // };
+        // if past receptors
+        let color = if note.start_time > state.map.time as f32 {
+            BEAT_SNAPS[note.snap_index].color
+        } else {
+            // macroquad::color::DARKGRAY
+            macroquad::color::BLACK
+        };
 
         draw.draw_rectangle(
             note_x,
-            note_y - SKIN.note_height,
+            note_y,
             SKIN.note_width,
             SKIN.note_height,
             color,
@@ -1312,7 +1268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- map loading ---
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let map_folder_path = project_dir.join("songs/snuffy");
+    let map_folder_path = project_dir.join("songs/somewhere else");
     let map_file_name_option = fs::read_dir(&map_folder_path)
         .map_err(|e| format!("Failed to read map directory {:?}: {}", map_folder_path, e))?
         .filter_map(Result::ok)
@@ -1358,15 +1314,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     map.rate = audio_manager.get_rate();
     map.mods.mirror = true;
 
-    // map processing functions
+    // map processing functions / preload
     let field_positions = set_reference_positions();
-    map.link_default_timing_group();
+    map.initialize_default_timing_group();
     map.sort();
-    // map.initialize_position_markers();
-    // map.initialize_timing_lines();
+    map.initialize_control_points();
+    map.initialize_hit_objects(&field_positions);
+    map.initialize_timing_lines();
     map.initialize_beat_snaps();
-    map.initialize_scroll_speed();
-    // map.initialize_hit_objects(&field_positions);
 
     let total_svs = map.timing_groups.values().map(|g| g.scroll_velocities.len()).sum::<usize>();
     let total_ssfs = map.timing_groups.values().map(|g| g.scroll_speed_factors.len()).sum::<usize>();
@@ -1387,8 +1342,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     write!(json_output_file, "{}", json_string)?;
     println!("Parsed map data written to output.json");
 
+    let start_instant = Instant::now();
+    let mut frame_count: u64 = 0;
+
     // main render loop
     loop {
+        frame_count += 1;
+
         // --- inputs ---
         if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Backspace) {
             break;
@@ -1423,13 +1383,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let new_rate = (audio_manager.get_rate() + 0.1).min(2.0);
             audio_manager.set_rate(new_rate);
             map.rate = new_rate;
-            map.initialize_scroll_speed();
         }
         if is_key_pressed(KeyCode::Left) {
             let new_rate = (audio_manager.get_rate() - 0.1).max(0.5);
             audio_manager.set_rate(new_rate);
             map.rate = new_rate;
-            map.initialize_scroll_speed();
         }
 
         let time = audio_manager.get_current_song_time_ms();
@@ -1513,6 +1471,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         draw_text(&format!("FPS: {}", get_fps()), 10.0, y_offset, 20.0, WHITE);
         y_offset += line_height;
+
+        let elapsed = start_instant.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            let avg_fps = frame_count as f64 / elapsed;
+            draw_text(
+                &format!("Avg FPS: {:.2}", avg_fps),
+                10.0,
+                y_offset,
+                20.0,
+                WHITE,
+            );
+            y_offset += line_height;
+        }
 
         if let Some(err_msg) = audio_manager.get_error() {
             draw_text(
