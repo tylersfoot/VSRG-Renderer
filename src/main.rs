@@ -1,351 +1,83 @@
-#![allow(unused)]
+// #![allow(unused)]
+#![allow(clippy::needless_return)]
+mod audio_manager;
+use audio_manager::AudioManager;
+use vsrg_renderer::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time};
 
-// use bitflags::bitflags;
-use macroquad::color::Color;
-use macroquad::prelude::*;
-use ordered_float::OrderedFloat;
-use rodio::{source::Source, Decoder, OutputStream, OutputStreamHandle, Sink};
-use serde::{Deserialize, Deserializer, Serialize};
-use core::{f64, time};
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::time::{Instant};
-use std::cmp::{min, max};
+use anyhow::Result;
+use core::f64;
+use macroquad::{
+    color::Color,
+    prelude::*,
+    window::{screen_height, screen_width},
+};
+use serde::{Deserialize, Serialize};
+
+use std::{
+    collections::{HashMap, VecDeque},
+    fs::{self, File},
+    io::{Error, Write as _},
+    mem::take,
+    path::Path,
+    string::ToString,
+    time::Instant,
+};
 
 const DEFAULT_TIMING_GROUP_ID: &str = "$Default";
-const GLOBAL_TIMING_GROUP_ID: &str = "$Global";
-const INITIAL_AUDIO_VOLUME: f64 = 0.03;
-const INITIAL_AUDIO_RATE: f64 = 1.0;
-const SNAP_EPSILON: f64 = 0.01; // tolerance for float comparisons
+// const GLOBAL_TIMING_GROUP_ID: &str = "$Global";
+
 const TRACK_ROUNDING: f64 = 100.0; // rounding for track positions, for int/float conversion
-
-struct AudioManager {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
-    sink: Option<Sink>,
-    audio_source_path: Option<PathBuf>,
-    current_error: Option<String>,
-
-    // timing related fields
-    playback_start_instant: Option<Instant>, // when current play segment started
-    accumulated_play_time_ms: f64,           // total time audio has played across pauses
-    is_audio_engine_paused: bool,            // to reflect actual sink state
-
-    length: Option<f64>, // length of audio
-    rate: f64,           // playback rate
-    is_playing: bool,
-    is_paused: bool,
-    is_stopped: bool,
-    time: f64,
-    position: f64,
-    volume: f64,
-}
-
-impl AudioManager {
-    pub fn new() -> Result<Self, String> {
-        let (stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| format!("Failed to get audio output stream: {}", e))?;
-
-        let initial_sink_result = Sink::try_new(&stream_handle);
-        let initial_sink = match initial_sink_result {
-            Ok(s) => s,
-            Err(e) => return Err(format!("Failed to create initial audio sink: {}", e)),
-        };
-
-        initial_sink.set_volume(INITIAL_AUDIO_VOLUME as f32);
-        initial_sink.set_speed(INITIAL_AUDIO_RATE as f32);
-        initial_sink.pause();
-
-        Ok(AudioManager {
-            _stream: stream,
-            stream_handle,
-            sink: Some(initial_sink),
-            audio_source_path: None,
-            current_error: None,
-            playback_start_instant: None,
-            accumulated_play_time_ms: 0.0,
-            is_audio_engine_paused: true,
-            length: None,
-            rate: INITIAL_AUDIO_RATE,
-            is_playing: false,
-            is_paused: false,
-            is_stopped: true,
-            time: 0.0,
-            position: 0.0,
-            volume: INITIAL_AUDIO_VOLUME,
-        })
-    }
-
-    pub fn set_audio_path(&mut self, path: Option<PathBuf>) {
-        self.audio_source_path = path;
-        self.current_error = None;
-        self.length = None; // reset duration when path changes
-
-        if self.audio_source_path.is_none() {
-            self.current_error = Some("No audio file specified in map.".to_string());
-        } else {
-            if let Some(p) = &self.audio_source_path {
-                match File::open(p) {
-                    Ok(file_handle) => {
-                        match Decoder::new(BufReader::new(file_handle)) {
-                            Ok(decoder) => {
-                                if let Some(duration) = decoder.total_duration() {
-                                    self.length = Some(duration.as_secs_f64() * 1000.0);
-                                }
-                                println!("Audio path set and verified decodable: {:?}, Duration: {:?} ms", p.display(), self.length);
-                            }
-                            Err(_) => {
-                                self.current_error = Some(format!("Failed to decode audio from: {:?}", p.display()));
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        self.current_error = Some(format!("Failed to open audio file at: {:?}", p.display()));
-                    }
-                }
-            }
-        }
-    }
-    fn load_and_append_to_sink(&mut self) -> bool {
-        if let Some(s) = self.sink.as_mut() {
-            if let Some(path) = &self.audio_source_path {
-                println!(
-                    "Audiomanager: Attempting to load and append: {:?}",
-                    path.display()
-                );
-                match File::open(path) {
-                    Ok(file) => match Decoder::new(BufReader::new(file)) {
-                        Ok(source) => {
-                            // store total duration if not already
-                            if self.length.is_none() {
-                                if let Some(duration) = source.total_duration() {
-                                    self.length = Some(duration.as_secs_f64() * 1000.0);
-                                }
-                            }
-                            s.append(source);
-                            self.current_error = None;
-                            println!("Audiomanager: Audio loaded and appended to sink.");
-                            return true;
-                        }
-                        Err(e) => {
-                            let err_msg = format!("Audiomanager: Failed to decode audio: {}", e);
-                            eprintln!("{}", err_msg);
-                            self.current_error = Some(err_msg);
-                        }
-                    },
-                    Err(e) => {
-                        let err_msg = format!("Audiomanager: Failed to open audio file: {}", e);
-                        eprintln!("{}", err_msg);
-                        self.current_error = Some(err_msg);
-                    }
-                }
-            } else {
-                let err_msg = "Audiomanager: No audio source path to load.".to_string();
-                println!("{}", err_msg);
-                self.current_error = Some(err_msg);
-            }
-        } else {
-            let err_msg = "Audiomanager: No audio sink available to load into.".to_string();
-            println!("{}", err_msg);
-            self.current_error = Some(err_msg);
-        }
-        false
-    }
-
-    pub fn play(&mut self) {
-        let need_load = if let Some(s) = self.sink.as_ref() {
-            s.empty()
-        } else {
-            false
-        };
-
-        if let Some(s) = self.sink.as_mut() {
-            if s.is_paused() || need_load {
-                // play if paused or if empty (needs loading)
-                if need_load {
-                    if !self.load_and_append_to_sink() {
-                        self.is_audio_engine_paused = true; // ensure state reflects failure
-                        return;
-                    }
-                }
-                // re-borrow after possible load
-                if let Some(s) = self.sink.as_mut() {
-                    s.play();
-                }
-                self.playback_start_instant = Some(Instant::now());
-                self.is_audio_engine_paused = false;
-                println!("Audiomanager: Audio playing/resumed.");
-            }
-        } else {
-            self.current_error = Some("Play called but no sink exists.".to_string());
-            println!("{}", self.current_error.as_ref().unwrap());
-            self.is_audio_engine_paused = true;
-        }
-    }
-
-    pub fn pause(&mut self) {
-        if let Some(s) = self.sink.as_mut() {
-            if !s.is_paused() {
-                s.pause();
-                if let Some(start_instant) = self.playback_start_instant.take() {
-                    self.accumulated_play_time_ms += start_instant.elapsed().as_secs_f64() * 1000.0;
-                }
-                self.is_audio_engine_paused = true;
-                println!(
-                    "Audiomanager: Audio paused. Accumulated time: {} ms",
-                    self.accumulated_play_time_ms
-                );
-            }
-        }
-    }
-
-    pub fn restart(&mut self) {
-        self.accumulated_play_time_ms = 0.0;
-        self.playback_start_instant = None;
-        self.is_audio_engine_paused = true; // will be set to false by play() if successful
-
-        if let Some(s) = self.sink.as_mut() {
-            s.stop();
-            s.clear();
-            println!("Audiomanager: Sink stopped and cleared for restart.");
-        } else {
-            match Sink::try_new(&self.stream_handle) {
-                Ok(new_sink) => {
-                    new_sink.set_volume(self.volume as f32);
-                    new_sink.set_speed(self.rate as f32);
-                    new_sink.pause();
-                    self.sink = Some(new_sink);
-                    println!("Audiomanager: New sink created on restart.");
-                }
-                Err(e) => {
-                    let err_msg = format!("Audiomanager: Failed to create sink on restart: {}", e);
-                    eprintln!("{}", err_msg);
-                    self.current_error = Some(err_msg);
-                    return;
-                }
-            }
-        }
-        // after restart, play() will handle loading and starting
-    }
-
-    pub fn get_current_song_time_ms(&self) -> f64 {
-        let mut current_time = self.accumulated_play_time_ms;
-        if !self.is_audio_engine_paused {
-            if let Some(start_instant) = self.playback_start_instant {
-                current_time = self.accumulated_play_time_ms
-                    + (start_instant.elapsed().as_secs_f64() * 1000.0 * self.rate);
-            }
-        }
-        // clamp time to total duration if available
-        if let Some(total_duration) = self.length {
-            current_time.min(total_duration)
-        } else {
-            current_time
-        }
-    }
-
-    pub fn is_playing(&self) -> bool {
-        !self.is_audio_engine_paused
-            && self
-                .sink
-                .as_ref()
-                .map_or(false, |s| !s.empty() && !s.is_paused())
-    }
-
-    pub fn get_total_duration_ms(&self) -> Option<f64> {
-        self.length
-    }
-
-    pub fn set_volume(&mut self, volume: f64) {
-        self.volume = volume.clamp(0.0, 1.5) as f64; // clamp volume
-        if let Some(s) = self.sink.as_mut() {
-            s.set_volume(self.volume as f32);
-        }
-        println!("Audiomanager: Volume set to {}", self.volume);
-    }
-
-    pub fn get_volume(&self) -> f64 {
-        self.volume
-    }
-
-    pub fn set_rate(&mut self, rate: f64) {
-        self.rate = rate.max(0.1); // prevent rate from being too low or zero
-        if let Some(s) = self.sink.as_mut() {
-            s.set_speed(self.rate as f32);
-        }
-        if !self.is_audio_engine_paused {
-            if let Some(start_instant) = self.playback_start_instant.take() {
-                self.accumulated_play_time_ms += start_instant.elapsed().as_secs_f64() * 1000.0;
-            }
-            self.playback_start_instant = Some(Instant::now());
-        }
-        println!("Audiomanager: Rate set to {}", self.rate);
-    }
-
-    pub fn get_rate(&self) -> f64 {
-        self.rate
-    }
-
-    pub fn get_error(&self) -> Option<&String> {
-        self.current_error.as_ref()
-    }
-}
 
 struct FieldPositions {
     // positions from top of screen
-    receptor_position_y: f64, // receptors position
-    hit_position_y: f64, // hit object target position
-    hold_hit_position_y: f64, // held hit object target position
-    hold_end_hit_position_y: f64, // LN end target position
-    timing_line_position_y: f64, // timing line position
+    receptor_position_y: f64,       // receptors position
+    hit_position_y: f64,            // hit object target position
+    hold_hit_position_y: f64,       // held hit object target position
+    hold_end_hit_position_y: f64,   // LN end target position
+    timing_line_position_y: f64,    // timing line position
     long_note_size_adjustment: f64, // size adjustment for LN so LN end time snaps with start time
 }
 
 // snap colors
 const BEAT_SNAPS: &[BeatSnap] = &[
-    BeatSnap { divisor: 48,  color: Color::new(255.0 / 255.0, 96.0  / 255.0, 96.0  / 255.0, 1.0) }, // 1st (red)
-    BeatSnap { divisor: 24,  color: Color::new(61.0  / 255.0, 132.0 / 255.0, 255.0 / 255.0, 1.0) }, // 2nd (blue)
-    BeatSnap { divisor: 16,  color: Color::new(178.0 / 255.0, 71.0  / 255.0, 255.0 / 255.0, 1.0) }, // 3rd (purple)
-    BeatSnap { divisor: 12,  color: Color::new(255.0 / 255.0, 238.0 / 255.0, 58.0  / 255.0, 1.0) }, // 4th (yellow)
-    BeatSnap { divisor: 8,   color: Color::new(255.0 / 255.0, 146.0 / 255.0, 210.0 / 255.0, 1.0) }, // 6th (pink)
-    BeatSnap { divisor: 6,   color: Color::new(255.0 / 255.0, 167.0 / 255.0, 61.0  / 255.0, 1.0) }, // 8th (orange)
-    BeatSnap { divisor: 4,   color: Color::new(132.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 1.0) }, // 12th (cyan)
-    BeatSnap { divisor: 3,   color: Color::new(127.0 / 255.0, 255.0 / 255.0, 138.0 / 255.0, 1.0) }, // 16th (green)
+    BeatSnap { divisor: 48,  color: Color::new(1.0,           96.0  / 255.0, 96.0  / 255.0, 1.0) }, // 1st (red)
+    BeatSnap { divisor: 24,  color: Color::new(61.0  / 255.0, 132.0 / 255.0, 1.0,           1.0) }, // 2nd (blue)
+    BeatSnap { divisor: 16,  color: Color::new(178.0 / 255.0, 71.0  / 255.0, 1.0,           1.0) }, // 3rd (purple)
+    BeatSnap { divisor: 12,  color: Color::new(1.0,           238.0 / 255.0, 58.0  / 255.0, 1.0) }, // 4th (yellow)
+    BeatSnap { divisor: 8,   color: Color::new(1.0,           146.0 / 255.0, 210.0 / 255.0, 1.0) }, // 6th (pink)
+    BeatSnap { divisor: 6,   color: Color::new(1.0,           167.0 / 255.0, 61.0  / 255.0, 1.0) }, // 8th (orange)
+    BeatSnap { divisor: 4,   color: Color::new(132.0 / 255.0, 1.0,           1.0,           1.0) }, // 12th (cyan)
+    BeatSnap { divisor: 3,   color: Color::new(127.0 / 255.0, 1.0,           138.0 / 255.0, 1.0) }, // 16th (green)
     BeatSnap { divisor: 1,   color: Color::new(200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 1.0) }, // 48th (gray) + fallback
 ];
 
 struct Skin {
     // skin settings
-    lane_width: f64, // width of each lane/column
-    note_width: f64, // width of each note
-    note_height: f64, // height of each note
-    hold_note_width: f64, // width of each hold note
-    hold_note_height: f64, // height of each hold note
+    note_shape: &'static str,  // shape of the notes ("circles", "bars")
+    lane_width: f64,           // width of each lane/column
+    note_width: f64,           // width of each note
+    note_height: f64,          // height of each note
     receptors_y_position: f64, // y position of the receptors/hit line
-    scroll_speed: f64, // scroll speed of the notes
-    rate_affects_scroll_speed: bool, // whether the rate multiplies the scroll speed
-    draw_lanes: bool, // whether to draw the lanes
-    wide_timing_lines: bool, // whether to draw timing lines to the sides of the screen
-    downscroll: bool, // downscroll (true) or upscroll (false)
+    scroll_speed: f64,         // scroll speed of the notes
+    // rate_affects_scroll_speed: bool, // whether the rate multiplies the scroll speed
+    // draw_lanes: bool,          // whether to draw the lanes
+    wide_timing_lines: bool,   // whether to draw timing lines to the sides of the screen
+    downscroll: bool,          // downscroll (true) or upscroll (false)
     normalize_scroll_velocity_by_rate_percentage: usize, // percentage of scaling applied when changing rates
 }
 
 const SKIN: Skin = Skin {
+    note_shape: "bars",
     lane_width: 145.0, // 136
     note_width: 145.0,
     note_height: 36.0, // 36
-    hold_note_width: 145.0,
-    hold_note_height: 36.0,
     receptors_y_position: 226.0, // 226
     scroll_speed: 320.0, // 200, // 20 in quaver
-    rate_affects_scroll_speed: false,
-    draw_lanes: true,
+    // rate_affects_scroll_speed: false,
+    // draw_lanes: true,
     wide_timing_lines: true,
     downscroll: true,
     normalize_scroll_velocity_by_rate_percentage: 0,
-
 };
 
 struct BeatSnap {
@@ -360,22 +92,17 @@ struct Mods {
     no_ssf: bool, // ignore scroll speed factor
 }
 
-impl Mods {
-    fn new() -> Self {
-        Self {
-            mirror: false,
-            no_sv: false,
-            no_ssf: false,
-        }
-    }
-}
-
 // anything representing a position on the track
 type Position = i64;
 
-// anything representing a time in milliseconds
-type Time = f64;
-
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "PascalCase")]
+#[derive(Default)]
+enum GameMode {
+    #[default]
+    Keys4,
+    Keys7,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
@@ -387,7 +114,7 @@ struct Map {
     map_id: Option<f64>,             // unique Map Identifier (-1 if not submitted)
     map_set_id: Option<f64>,         // unique Map Set identifier (-1 if not submitted)
     #[serde(default)]
-    mode: String,                    // game mode for this map {Keys4, Keys7}
+    mode: GameMode,                  // game mode for this map {Keys4, Keys7}
     title: Option<String>,           // song title
     artist: Option<String>,          // song artist
     source: Option<String>,          // source of the song (album, mixtape, etc.)
@@ -412,8 +139,6 @@ struct Map {
     bookmarks: Vec<serde_yaml::Value>,
     #[serde(default)]
     custom_audio_samples: Vec<serde_yaml::Value>,
-    #[serde(default)]
-    sound_effects: Vec<SoundEffect>,
     #[serde(default)]
     timing_points: Vec<TimingPoint>,
     #[serde(default)]
@@ -446,8 +171,8 @@ impl Map {
             DEFAULT_TIMING_GROUP_ID.to_string(),
             TimingGroup {
                 initial_scroll_velocity: self.initial_scroll_velocity, // set init sv
-                scroll_velocities: self.scroll_velocities.clone(), // copy svs
-                scroll_speed_factors: self.scroll_speed_factors.clone(), // copy ssfs
+                scroll_velocities: take(&mut self.scroll_velocities), // copy svs
+                scroll_speed_factors: take(&mut self.scroll_speed_factors), // copy ssfs
                 color_rgb: None,
                 current_track_position: 0,
                 current_ssf_factor: 1.0,
@@ -461,10 +186,6 @@ impl Map {
                 hit_object.timing_group = Some(DEFAULT_TIMING_GROUP_ID.to_string());
             }
         }
-
-        // ! removing from main map for debug
-        self.scroll_velocities.clear();
-        self.scroll_speed_factors.clear();
     }
 
     fn initialize_control_points(&mut self) {
@@ -506,9 +227,7 @@ impl Map {
                 .get_mut(hit_object.timing_group.as_ref().unwrap())
                 .unwrap();
 
-            hit_object.start_position = timing_group.get_position_from_time(
-                hit_object.start_time,
-            );
+            hit_object.start_position = timing_group.get_position_from_time(hit_object.start_time);
 
             hit_object.hit_position = if hit_object.end_time.is_some() {
                 // LN
@@ -524,9 +243,7 @@ impl Map {
         // creates timing lines based on timing points' signatures and BPMs
         self.timing_lines.clear();
 
-        let tg = self.timing_groups
-            .get(DEFAULT_TIMING_GROUP_ID)
-            .unwrap();
+        let tg = &self.timing_groups[DEFAULT_TIMING_GROUP_ID];
 
         // loop through timing points
         for tp_index in 0..self.timing_points.len() {
@@ -537,28 +254,29 @@ impl Map {
 
             // the "current time" that will be incrementing)
             let mut current_time = self.timing_points[tp_index].start_time;
-            let mut end_time = if tp_index + 1 < self.timing_points.len() {
+            let end_time = if tp_index + 1 < self.timing_points.len() {
                 // this isn't the last timing point
                 // end 1ms earlier to avoid possible timing line overlap
-                self.timing_points[tp_index + 1].start_time - 1.0
+                self.timing_points[tp_index + 1].start_time - 1f64
             } else {
                 // last timing point, end at map length
                 self.length
             };
 
             // time signature (3/4 or 4/4)
-            let signature = self.timing_points[tp_index]
-                .time_signature
-                .as_ref()
-                .cloned()
-                .unwrap_or(TimeSignature::Quadruple) as u32 as f64;
+            let signature = f64::from(
+                self.timing_points[tp_index]
+                    .time_signature
+                    .clone()
+                    .unwrap_or(TimeSignature::Quadruple) as u32,
+            );
 
             // "max possible sane value for timing lines" - quaver devs
             const MAX_BPM: f64 = 9999.0;
-            let ms_per_beat = 60000.0 / MAX_BPM.min(self.timing_points[tp_index].bpm.abs());
+            let ms_per_beat = 60000f64 / MAX_BPM.min(self.timing_points[tp_index].bpm.abs());
             // how many ms between measures/timing lines
             let ms_increment = signature * ms_per_beat;
-            if ms_increment <= 0.0 {
+            if ms_increment <= 0f64 {
                 continue; // no increment, skip this timing point
             }
 
@@ -567,14 +285,12 @@ impl Map {
                 let start_position = tg.get_position_from_time(current_time);
 
                 // create and add new timing line
-                self.timing_lines.push(
-                    TimingLine {
-                        start_time: current_time,
-                        start_position: start_position,
-                        current_track_position: 0,
-                        hit_position: field_positions.timing_line_position_y,
-                    }
-                );
+                self.timing_lines.push(TimingLine {
+                    start_time: current_time,
+                    start_position,
+                    current_track_position: 0,
+                    hit_position: field_positions.timing_line_position_y,
+                });
 
                 // increment time for next timing line
                 current_time += ms_increment;
@@ -589,13 +305,12 @@ impl Map {
                 .unwrap_or(&self.timing_points[0]);
 
             // get beat length (ms per beat)
-            let beat_length = 60000.0 / timing_point.bpm;
+            let beat_length = 60000f64 / timing_point.bpm;
             // calculate offset from timing point start time
             let offset = hit_object.start_time - timing_point.start_time;
 
             // calculate note's snap index
             let index = (48.0 * offset / beat_length).round() as u32;
-
 
             // defualt value; will be overwritten unless
             // not snapped to 1/16 or less, snap to 1/48
@@ -618,12 +333,12 @@ impl Map {
 
         // sort timing points
         sort_by_start_time(&mut self.timing_points);
-        
+
         // sort scroll velocities
         for timing_group in self.timing_groups.values_mut() {
             sort_by_start_time(&mut timing_group.scroll_velocities);
         }
-        
+
         // sort scroll speed factors
         for timing_group in self.timing_groups.values_mut() {
             sort_by_start_time(&mut timing_group.scroll_speed_factors);
@@ -642,14 +357,14 @@ impl Map {
     fn update_scroll_speed(&mut self) {
         // updates the scroll speed of all timing groups
         let speed = SKIN.scroll_speed;
-        let rate_scaling = 1.0
-            + (self.rate - 1.0)
-            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f64 / 100.0);
+        let rate_scaling = 1f64
+            + (self.rate - 1f64)
+            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f64 / 100f64);
         let adjusted_scroll_speed = (speed * rate_scaling).clamp(50.0, 1000.0);
-        let scaling_factor = 1920.0 / 1366.0; // quaver's scaling
+        let scaling_factor = 1920f64 / 1366f64; // quaver's scaling
 
-        let scroll_speed = (adjusted_scroll_speed / 10.0)
-            / (20.0 * self.rate)
+        let scroll_speed = (adjusted_scroll_speed / 10f64)
+            / (20f64 * self.rate)
             * scaling_factor; // * base_to_virtual_ratio
 
         for timing_group in self.timing_groups.values_mut() {
@@ -681,49 +396,44 @@ impl Map {
                 .timing_groups
                 .get_mut(hit_object.timing_group.as_ref().unwrap())
                 .unwrap();
-            
-            
-            while (hit_object.previous_positions.len() < 10) {
+
+            while hit_object.previous_positions.len() < 10 {
                 // ensure we have at least 10 previous positions
-                hit_object.previous_positions.push(hit_object.position);
+                hit_object
+                    .previous_positions
+                    .push_front(hit_object.position);
             }
 
-
-            hit_object.previous_positions.insert(0, hit_object.position);
+            hit_object.previous_positions.push_front(hit_object.position);
             if hit_object.previous_positions.len() > 10 {
-                hit_object.previous_positions.pop();
+                hit_object
+                    .previous_positions
+                    .pop_back();
             }
 
             hit_object.position = timing_group.get_object_position(
                 hit_object.hit_position,
                 hit_object.start_position,
                 true,
-                );
+            );
         }
     }
 
-    fn get_key_count(&self, include_scratch: bool) -> i64 {
+    const fn get_key_count(&self, include_scratch: bool) -> i64 {
         // returns the number of keys in the map
-        let mut key_count = match self.mode.as_str() {
-            "Keys4" => 4,
-            "Keys7" => 7,
-            _ => panic!("Invalid game mode"),
+        let key_count = match self.mode {
+            GameMode::Keys4 => 4,
+            GameMode::Keys7 => 7,
         };
 
         if self.has_scratch_key && include_scratch {
-            return key_count + 1;
+            key_count + 1
         } else {
-            return key_count;
+            key_count
         }
     }
-
 }
 
-trait HasStartTime {
-
-    // for objects with a start time
-    fn start_time(&self) -> Time;
-}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct TimingLine {
     #[serde(default)]
@@ -785,19 +495,11 @@ struct HitObject {
     lane: i64,
     key_sounds: Vec<KeySound>, // key sounds to play when this object is hit
     #[serde(default)]
-    #[serde(deserialize_with = "deserialize_hit_sounds")]
-    hit_sound: Vec<HitSounds>,
     timing_group: Option<String>,
-    #[serde(skip)]
-    removed: bool, // if object is out of range
     #[serde(skip)]
     snap_index: usize, // index for snap color
     #[serde(skip)]
     hold_end_hit_position: f64, // position for LN ends
-    #[serde(skip)]
-    current_long_note_body_size: f64, // current size of the LN body
-    #[serde(skip)]
-    scroll_direction: bool, // true for upscroll, false for downscroll
     #[serde(skip)]
     hit_position: f64, // where the note is "hit", calculated from hit body height and hit position offset
     #[serde(skip)]
@@ -805,12 +507,11 @@ struct HitObject {
     #[serde(skip)]
     position: Position, // live map position, calculated with timing group
     #[serde(skip)]
-    previous_positions: Vec<Position>, // previous positions, used for rendering effects
-    
+    previous_positions: VecDeque<Position>, // previous positions, used for rendering effects
 }
 
-    // public virtual float CurrentLongNoteBodySize => (LatestHeldPosition - EarliestHeldPosition) *
-    //     TimingGroupController.ScrollSpeed / HitObjectManagerKeys.TrackRounding;
+// public virtual float CurrentLongNoteBodySize => (LatestHeldPosition - EarliestHeldPosition) *
+//     TimingGroupController.ScrollSpeed / HitObjectManagerKeys.TrackRounding;
 
 impl HasStartTime for HitObject {
     fn start_time(&self) -> Time {
@@ -836,7 +537,7 @@ struct TimingGroup {
     #[serde(default)]
     scroll_speed_factors: Vec<ControlPoint>,
     color_rgb: Option<String>,
-    // info for playback
+    // log::info for playback
     #[serde(skip)]
     current_track_position: Position, // current playback position
     #[serde(default = "one_f64")]
@@ -849,7 +550,7 @@ impl TimingGroup {
     fn get_scroll_speed_factor_from_time(&self, time: Time) -> f64 {
         // gets the SSF multiplier at a time, with linear interpolation
         let ssf_index = index_at_time(&self.scroll_speed_factors, time);
- 
+
         match ssf_index {
             None => {
                 // before first SSF point or no SSFs, so no effect applied
@@ -864,12 +565,11 @@ impl TimingGroup {
 
                 let next_ssf = &self.scroll_speed_factors[index + 1];
                 // lerp between this and next point based on time between
-                let multiplier = lerp(
+                return lerp(
                     ssf.multiplier,
                     next_ssf.multiplier,
-                    ((time - ssf.start_time) / (next_ssf.start_time - ssf.start_time))
+                    (time - ssf.start_time) / (next_ssf.start_time - ssf.start_time),
                 );
-                return multiplier;
             }
         }
     }
@@ -913,17 +613,9 @@ impl TimingGroup {
             scroll_speed *= self.current_ssf_factor;
         }
 
-        // let position = (hit_position as i64)
-        //     + (
-        //         (initial_position - self.current_track_position)
-        //         * -self.scroll_speed as i64
-        //         / TRACK_ROUNDING as i64
-        // );
-
-
         let distance = (initial_position as f64) - (self.current_track_position as f64);
-        let position = hit_position + (distance * scroll_speed / TRACK_ROUNDING); 
-        return (position as Position);
+        let position = hit_position + (distance * scroll_speed / TRACK_ROUNDING);
+        return position as Position;
     }
 }
 
@@ -948,114 +640,8 @@ enum TimeSignature {
     Triple = 3,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-enum HitSounds {
-    Normal = 0b0001,
-    Whistle = 0b0010,
-    Finish = 0b0100,
-    Clap = 0b1000,
-}
-
-impl Default for HitSounds {
-    fn default() -> Self {
-        // HitSounds::empty()
-        HitSounds::Normal
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "PascalCase")]
-struct SoundEffect {
-    // sound effect for the map
-    #[serde(default)]
-    start_time: Time, // the time at which to play the sound sample
-    #[serde(default)]
-    sample: f64, // the one-based index of the sound sample in the CustomAudioSamples array
-    #[serde(default)]
-    volume: f64, // the volume of the sound sample (defaults to 100)
-    #[serde(default)]
-    sound_effect: String,
-}
-
-impl HasStartTime for SoundEffect {
-    fn start_time(&self) -> Time {
-        self.start_time
-    }
-}
-
-fn deserialize_hit_sounds<'de, D>(deserializer: D) -> Result<Vec<HitSounds>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::de::Error;
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    if let Some(s) = s {
-        s.split(',')
-            .map(|name| match name.trim() {
-                "Normal" => Ok(HitSounds::Normal),
-                "Whistle" => Ok(HitSounds::Whistle),
-                "Finish" => Ok(HitSounds::Finish),
-                "Clap" => Ok(HitSounds::Clap),
-                "" => Err(Error::custom("Empty hit sound")),
-                other => Err(Error::custom(format!("Unknown hit sound: '{}'", other))),
-            })
-            .collect()
-    } else {
-        Ok(vec![]) // empty if not present
-    }
-}
-
-fn one_f32() -> f32 { 
+const fn one_f64() -> f64 {
     return 1.0;
-}
-
-fn one_f64() -> f64 { 
-    return 1.0;
-}
-
-fn zero_f64() -> f64 {
-    return 0.00;
-}
-
-// linear interpolation between a and b based on time t
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t
-}
-
-// returns index of currently active item (start_time <= time)
-fn index_at_time<T: HasStartTime>(list: &[T], time: Time) -> Option<usize> {
-    // binary search
-    if list.is_empty() || list[0].start_time() > time {
-        // no items before or list is empty
-        return None;
-    }
-
-    let mut left = 0;
-    let mut right = list.len() - 1;
-
-    while left <= right {
-        let mid = left + (right - left) / 2;
-        if list[mid].start_time() <= time {
-            left = mid + 1;
-        } else {
-            if mid == 0 {
-                break;
-            }
-            right = mid - 1;
-        }
-    }
-    
-    Some(right)
-}
-
-// returns currently active item (start_time <= time)
-fn object_at_time<T: HasStartTime>(list: &[T], time: Time) -> Option<&T> {
-    index_at_time(list, time).map(|i| &list[i])
-}
-
-// sorts a vector of items by their start time
-fn sort_by_start_time<T: HasStartTime>(items: &mut Vec<T>) {
-    items.sort_by(|a, b| a.start_time().partial_cmp(&b.start_time()).unwrap());
 }
 
 fn set_reference_positions() -> FieldPositions {
@@ -1068,47 +654,45 @@ fn set_reference_positions() -> FieldPositions {
         long_note_size_adjustment: 0.0,
     };
 
-    let lane_size = SKIN.lane_width; // * base_to_virtual_ratio
+    // let lane_size = SKIN.lane_width; // * base_to_virtual_ratio
 
     // let hit_object_offset = lane_size * SKIN.note_height / SKIN.note_width;
-    let hit_object_offset = 0.0; // temp
+    let hit_object_offset = 0f64; // temp
     // let hold_hit_object_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_hit_object_offset = 0.0; // temp
+    let hold_hit_object_offset = 0f64; // temp
     // let hold_end_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_end_offset = 0.0; // temp
-    let receptors_height = 0.0; // temp
-    let receptors_width = lane_size; // temp
+    let hold_end_offset = 0f64; // temp
+    // let receptors_height = 0.0; // temp
+    // let receptors_width = lane_size; // temp
     // let receptor_offset = lane_size * receptors_height / receptors_width;
-    let receptor_offset = 0.0; // temp
+    let receptor_offset = 0f64; // temp
 
-    field_positions.long_note_size_adjustment = hold_hit_object_offset / 2.0;
+    field_positions.long_note_size_adjustment = hold_hit_object_offset / 2f64;
 
     if SKIN.downscroll {
         field_positions.receptor_position_y = -SKIN.receptors_y_position - receptor_offset; // + window_height
-        field_positions.hit_position_y = field_positions.receptor_position_y + 0.0 - hit_object_offset; // 0.0 = hit_pos_offset
-        field_positions.hold_hit_position_y = field_positions.receptor_position_y + 0.0 - hold_hit_object_offset; // 0.0 = hit_pos_offset
-        field_positions.hold_end_hit_position_y = field_positions.receptor_position_y + 0.0 - hold_end_offset; // 0.0 = hit_pos_offset
-        field_positions.timing_line_position_y = field_positions.receptor_position_y + 0.0 // 0.0 = hit_pos_offset
+        field_positions.hit_position_y = field_positions.receptor_position_y + 0f64 - hit_object_offset; // 0.0 = hit_pos_offset
+        field_positions.hold_hit_position_y = field_positions.receptor_position_y + 0f64 - hold_hit_object_offset; // 0.0 = hit_pos_offset
+        field_positions.hold_end_hit_position_y = field_positions.receptor_position_y + 0f64 - hold_end_offset; // 0.0 = hit_pos_offset
+        field_positions.timing_line_position_y = field_positions.receptor_position_y + 0f64; // 0.0 = hit_pos_offset
     } else {
         // i dont care about upscroll right now
     }
 
     return field_positions;
-
 }
 
-struct FrameState<'a> {
-    pub map: &'a mut Map,
-    pub field_positions: &'a FieldPositions,
+struct FrameState<'map> {
+    pub map: &'map mut Map,
+    pub field_positions: &'map FieldPositions,
 }
 
 trait Draw {
-    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: macroquad::color::Color);
-    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: macroquad::color::Color);
-    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: 
-    macroquad::color::Color);
-    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: macroquad::color::Color);
-    fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color);
+    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: Color);
+    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: Color);
+    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: Color);
+    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: Color);
+    // fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color);
     fn screen_height(&self) -> f64;
     fn screen_width(&self) -> f64;
 }
@@ -1116,27 +700,26 @@ trait Draw {
 struct MacroquadDraw;
 
 impl Draw for MacroquadDraw {
-    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_rectangle(x as f32, y as f32, w as f32, h as f32, color);
+    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: Color) {
+        draw_rectangle(x as f32, y as f32, w as f32, h as f32, color);
     }
-    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_line(x1 as f32, y1 as f32, x2 as f32, y2 as f32, thickness as f32, color);
+    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: Color) {
+        draw_line(x1 as f32, y1 as f32, x2 as f32, y2 as f32, thickness as f32, color);
     }
-    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: 
-    macroquad::color::Color) {
-        macroquad::shapes::draw_circle(x as f32, y as f32, radius as f32, color);
+    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: Color) {
+        draw_circle(x as f32, y as f32, radius as f32, color);
     }
-    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_circle_lines(x as f32, y as f32, radius as f32, thickness as f32, color);
+    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: Color) {
+        draw_circle_lines(x as f32, y as f32, radius as f32, thickness as f32, color);
     }
-    fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color) {
-        macroquad::text::draw_text(text, x as f32, y as f32, size as f32, color);
-    }
+    // fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color) {
+    //     macroquad::text::draw_text(text, x as f32, y as f32, size as f32, color);
+    // }
     fn screen_height(&self) -> f64 {
-        macroquad::window::screen_height() as f64
+        return f64::from(screen_height());
     }
     fn screen_width(&self) -> f64 {
-        macroquad::window::screen_width() as f64
+        return f64::from(screen_width());
     }
 }
 
@@ -1160,35 +743,41 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
 
     let num_lanes = state.map.get_key_count(false);
     let playfield_width = num_lanes as f64 * SKIN.lane_width;
-    let playfield_x = (window_width - playfield_width) / 2.0;
+    let playfield_x = (window_width - playfield_width) / 2f64;
 
     // receptors (above notes)
-    // for i in 0..4 {
-    //     // draw receptors
-    //     let receptor_x = playfield_x
-    //         + (i as f64 * SKIN.lane_width)
-    //         + (SKIN.lane_width / 2.0); // center in lane;
+    match SKIN.note_shape {
+        "bars" => {
+            draw.draw_line(
+                0.0,
+                window_height + state.field_positions.receptor_position_y,
+                window_width,
+                window_height + state.field_positions.receptor_position_y,
+                3.0,
+                GRAY,
+            );
+        }
+        "circles" => {
+            for i in 0i32..4i32 {
+                // draw receptors
+                let receptor_x = playfield_x
+                    + (f64::from(i) * SKIN.lane_width)
+                    + (SKIN.lane_width / 2f64); // center in lane;
 
-    //     draw.draw_circle_outline(
-    //         receptor_x,
-    //         window_height + state.field_positions.receptor_position_y,
-    //         SKIN.note_width / 2.2,
-    //         2.0,
-    //         GRAY,
-    //     );
-    // }
-
-    draw.draw_line(
-        0.0,
-        window_height + state.field_positions.receptor_position_y,
-        window_width,
-        window_height + state.field_positions.receptor_position_y,
-        3.0,
-        GRAY,
-    );
+                draw.draw_circle_outline(
+                    receptor_x,
+                    window_height + state.field_positions.receptor_position_y,
+                    SKIN.note_width / 2.2,
+                    2.0,
+                    GRAY,
+                );
+            }
+        }
+        _ => {}
+    }
 
     let line_color = GRAY;
-    let line_thickness = 1.0;
+    let line_thickness = 1f64;
 
     // timing lines
     for timing_line in &state.map.timing_lines {
@@ -1217,8 +806,8 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
         let note = &state.map.hit_objects[index];
         if note.start_time <= state.map.time {
             // past receptors, skip rendering
-            continue
-        };
+            continue;
+        }
 
         let note_y = (note.position as f64) + window_height; // real hitbox
 
@@ -1232,14 +821,14 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
 
         let note_x = playfield_x
             + (lane_index as f64 * SKIN.lane_width)
-            + (SKIN.lane_width / 2.0) // center in lane
-            - (SKIN.note_width / 2.0);
+            + (SKIN.lane_width / 2f64) // center in lane
+            - (SKIN.note_width / 2f64);
 
-        let mut note_top_offset = SKIN.note_height / 2.0;
-        let mut note_bottom_offset = SKIN.note_height / 2.0;
-        let middle_position = note_y - SKIN.note_height / 2.0;
+        let mut note_top_offset = SKIN.note_height / 2f64;
+        let mut note_bottom_offset = SKIN.note_height / 2f64;
+        let middle_position = note_y - SKIN.note_height / 2f64;
         let frame_behind = 0;
-        let stretch_limit = SKIN.note_height * 8.0; // max stretch limit
+        let stretch_limit = SKIN.note_height * 8f64; // max stretch limit
 
         // calculate stretch from previous positions
         for i in 0..note.previous_positions.len() {
@@ -1253,7 +842,7 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
                 // stretch is too big, ignore
                 continue;
             }
-            if stretch > 0.0 {
+            if stretch > 0f64 {
                 note_top_offset = note_top_offset.max(stretch);
             } else {
                 // moving up
@@ -1262,38 +851,42 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
         }
 
         // snap colors
-        let mut color = BEAT_SNAPS[note.snap_index].color;
+        let color = BEAT_SNAPS[note.snap_index].color;
 
-        draw.draw_rectangle(
-            note_x,
-            middle_position  - note_top_offset,
-            SKIN.note_width,
-            note_top_offset + note_bottom_offset,
-            color,
-        );
-
-        // draw.draw_circle(
-        //     note_x + (SKIN.note_width / 2.0),
-        //     middle_position,
-        //     SKIN.note_width / 2.4,
-        //     color,
-        // );
-
-        // draw.draw_rectangle( // middle of note
-        //     note_x,
-        //     middle_position,
-        //     SKIN.note_width,
-        //     1.0,
-        //     WHITE,
-        // );        
-        // draw.draw_rectangle( // hitbox
-        //     note_x,
-        //     note_y,
-        //     SKIN.note_width,
-        //     1.0,
-        //     WHITE,
-        // );
-
+        match SKIN.note_shape {
+            "bars" => {
+                draw.draw_rectangle(
+                    note_x,
+                    middle_position - note_top_offset,
+                    SKIN.note_width,
+                    note_top_offset + note_bottom_offset,
+                    color,
+                );
+                // draw.draw_rectangle( // middle of note
+                //     note_x,
+                //     middle_position,
+                //     SKIN.note_width,
+                //     1.0,
+                //     WHITE,
+                // );
+                // draw.draw_rectangle( // hitbox
+                //     note_x,
+                //     note_y,
+                //     SKIN.note_width,
+                //     1.0,
+                //     WHITE,
+                // );
+            }
+            "circles" => {
+                draw.draw_circle(
+                    note_x + (SKIN.note_width / 2.0),
+                    note_y,
+                    SKIN.note_width / 2.4,
+                    color,
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1307,48 +900,46 @@ fn window_conf() -> Conf {
 }
 
 #[macroquad::main(window_conf)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut is_fullscreen: bool = false;
+async fn main() -> anyhow::Result<()> {
+    simple_logger::init().unwrap();
+    let mut is_fullscreen = false;
     let song_name = "funky";
 
     // --- audio setup ---
     let mut audio_manager = AudioManager::new().map_err(|e| {
-        eprintln!("Critical audio error on init: {}", e);
-        std::io::Error::new(std::io::ErrorKind::Other, e)
+        log::error!("Critical audio error on init: {e}");
+        Error::other(e)
     })?;
 
     // --- map loading ---
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map_folder_path = project_dir.join("songs/").join(song_name);
     let map_file_name_option = fs::read_dir(&map_folder_path)
-        .map_err(|e| format!("Failed to read map directory {:?}: {}", map_folder_path, e))?
+        .map_err(|e| anyhow::anyhow!("Failed to read map directory {:?}: {}", map_folder_path, e))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().map_or(false, |ext| ext == "qua"))
-        .and_then(|path| path.to_str().map(|s| s.to_string()));
+        .find(|path| path.extension().is_some_and(|ext| ext == "qua"))
+        .and_then(|path| path.to_str().map(ToString::to_string));
 
-    let map_file_name = match map_file_name_option {
-        Some(name) => name,
-        None => {
-            let err_msg = format!(
-                "Error: No .qua file found in directory {:?}",
-                map_folder_path
-            );
-            eprintln!("{}", err_msg);
-            loop {
-                clear_background(DARKGRAY);
-                draw_text(&err_msg, 20.0, 20.0, 20.0, RED);
-                next_frame().await;
-            }
+    let Some(map_file_name) = map_file_name_option else {
+        let err_msg = format!(
+            "Error: No .qua file found in directory {}",
+            map_folder_path.display()
+        );
+        log::error!("{err_msg}");
+        loop {
+            clear_background(DARKGRAY);
+            draw_text(&err_msg, 20.0, 20.0, 20.0, RED);
+            next_frame().await;
         }
     };
 
-    println!("Loading map: {}", map_file_name);
+    log::info!("Loading map: {map_file_name}");
     let qua_file_content = fs::read_to_string(&map_file_name)
-        .map_err(|e| format!("Failed to read map file '{}': {}", map_file_name, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read map file '{}': {}", map_file_name, e))?;
 
     let mut map: Map = serde_yaml::from_str(&qua_file_content)
-        .map_err(|e| format!("Failed to parse map data from '{}': {}", map_file_name, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse map data from '{}': {}", map_file_name, e))?;
 
     // set audio path in audio manager
     if let Some(audio_filename_str) = &map.audio_file {
@@ -1361,7 +952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_manager.set_audio_path(None);
     }
 
-    map.length = audio_manager.get_total_duration_ms().unwrap();
+    map.length = audio_manager.get_total_duration_ms().unwrap_or(0f64);
     map.rate = audio_manager.get_rate();
     map.mods.mirror = true;
 
@@ -1380,14 +971,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_ssfs = map.timing_groups.values().map(|g| g.scroll_speed_factors.len()).sum::<usize>();
     let total_timing_groups = map.timing_groups.len();
     let total_timing_lines = map.timing_lines.len();
-    println!(
-        "Map loaded successfully: {} Hit Objects, {} Timing Points, {} SVs, {} SSFs, {} Timing Groups, {} Timing Lines",
-        total_hit_objects,
-        total_timing_points,
-        total_svs,
-        total_ssfs,
-        total_timing_groups,
-        total_timing_lines,
+    log::info!(
+        "Map loaded successfully: {total_hit_objects} Hit Objects, {total_timing_points} Timing Points, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Timing Groups, {total_timing_lines} Timing Lines",
     );
 
     // this is the visual play state, audio is handled by audio_manager
@@ -1395,8 +980,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut json_output_file = File::create("output.json")?;
     let json_string = serde_json::to_string_pretty(&map)?;
-    write!(json_output_file, "{}", json_string)?;
-    println!("Parsed map data written to output.json");
+    write!(json_output_file, "{json_string}")?;
+    log::info!("Parsed map data written to output.json");
 
     let start_instant = Instant::now();
     let mut frame_count: u64 = 0;
@@ -1469,13 +1054,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(difficulty),
             Some(creator),
         ) = (
-            &map.title,
-            &map.artist,
-            &map.difficulty_name, 
-            &map.creator,
+            map.title.as_ref(),
+            map.artist.as_ref(),
+            map.difficulty_name.as_ref(),
+            map.creator.as_ref(),
         ) {
             draw_text(
-                &format!("Map: {} - {} [{}] by {}", title, artist, difficulty, creator),
+                &format!("Map: {title} - {artist} [{difficulty}] by {creator}"),
                 10.0,
                 y_offset,
                 20.0,
@@ -1486,13 +1071,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         draw_text(
             &format!(
-                "{} Notes, {} SVs, {} SSFs, {} Groups, {} Timing Points, {} Timing Lines",
-                total_hit_objects,
-                total_svs,
-                total_ssfs,
-                total_timing_groups,
-                total_timing_points,
-                total_timing_lines,
+                "{total_hit_objects} Notes, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Groups, {total_timing_points} Timing Points, {total_timing_lines} Timing Lines",
             ),
             10.0,
             y_offset,
@@ -1509,15 +1088,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let audio_actual_state_text = if audio_manager.is_playing() {
             "Playing"
-        } else if audio_manager.sink.as_ref().map_or(false, |s| s.is_paused()) {
+        } else if audio_manager
+            .sink
+            .as_ref()
+            .is_some_and(rodio::Sink::is_paused)
+        {
             "Paused"
         } else {
             "Stopped/empty"
         };
         draw_text(
             &format!(
-                "Visuals: {} | Audio: {} (space, r)",
-                visual_state_text, audio_actual_state_text
+                "Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"
             ),
             10.0,
             y_offset,
@@ -1540,15 +1122,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         y_offset += line_height;
 
         let total_duration_str = match audio_manager.get_total_duration_ms() {
-            Some(d) => format!("{:.2}s", d / 1000.0),
+            Some(d) => format!("{:.2}s", d / 1000f64),
             None => "N/A".to_string(),
         };
         draw_text(
-            &format!(
-                "Time: {:.2}s / {}",
-                time / 1000.0,
-                total_duration_str
-            ),
+            &format!("Time: {:.2}s / {}", time / 1000f64, total_duration_str),
             10.0,
             y_offset,
             20.0,
@@ -1558,13 +1136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let fps = format!("{:<3}", get_fps());
         let elapsed = start_instant.elapsed().as_secs_f64();
-        let avg_fps = if elapsed > 0.0 {
+        let avg_fps = if elapsed > 0f64 {
             frame_count as f64 / elapsed
         } else {
-            0.0
+            0f64
         };
         draw_text(
-            &format!("FPS: {} | {:.2}", fps, avg_fps),
+            &format!("FPS: {fps} | {avg_fps:.2}"),
             10.0,
             y_offset,
             20.0,
@@ -1574,7 +1152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(err_msg) = audio_manager.get_error() {
             draw_text(
-                &format!("Audio status: {}", err_msg),
+                &format!("Audio status: {err_msg}"),
                 10.0,
                 y_offset,
                 18.0,
