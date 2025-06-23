@@ -6,7 +6,6 @@ use macroquad::prelude::*;
 use ordered_float::OrderedFloat;
 use rodio::{source::Source, Decoder, OutputStream, OutputStreamHandle, Sink};
 use serde::{Deserialize, Deserializer, Serialize};
-use core::{f64, time};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
@@ -16,10 +15,10 @@ use std::cmp::{min, max};
 
 const DEFAULT_TIMING_GROUP_ID: &str = "$Default";
 const GLOBAL_TIMING_GROUP_ID: &str = "$Global";
-const INITIAL_AUDIO_VOLUME: f64 = 0.03;
-const INITIAL_AUDIO_RATE: f64 = 1.0;
-const SNAP_EPSILON: f64 = 0.01; // tolerance for float comparisons
-const TRACK_ROUNDING: f64 = 100.0; // rounding for track positions, for int/float conversion
+const INITIAL_AUDIO_VOLUME: f32 = 0.01;
+const INITIAL_AUDIO_RATE: f32 = 1.0;
+const SNAP_EPSILON: f32 = 0.01; // tolerance for float comparisons
+const TRACK_ROUNDING: f32 = 1.0; // rounding for track positions, for int/float conversion
 
 struct AudioManager {
     _stream: OutputStream,
@@ -34,13 +33,13 @@ struct AudioManager {
     is_audio_engine_paused: bool,            // to reflect actual sink state
 
     length: Option<f64>, // length of audio
-    rate: f64,           // playback rate
+    rate: f32,           // playback rate
     is_playing: bool,
     is_paused: bool,
     is_stopped: bool,
     time: f64,
     position: f64,
-    volume: f64,
+    volume: f32,
 }
 
 impl AudioManager {
@@ -54,8 +53,8 @@ impl AudioManager {
             Err(e) => return Err(format!("Failed to create initial audio sink: {}", e)),
         };
 
-        initial_sink.set_volume(INITIAL_AUDIO_VOLUME as f32);
-        initial_sink.set_speed(INITIAL_AUDIO_RATE as f32);
+        initial_sink.set_volume(INITIAL_AUDIO_VOLUME);
+        initial_sink.set_speed(INITIAL_AUDIO_RATE);
         initial_sink.pause();
 
         Ok(AudioManager {
@@ -92,7 +91,7 @@ impl AudioManager {
                         match Decoder::new(BufReader::new(file_handle)) {
                             Ok(decoder) => {
                                 if let Some(duration) = decoder.total_duration() {
-                                    self.length = Some(duration.as_secs_f64() * 1000.0);
+                                    self.length = Some(duration.as_millis() as f64);
                                 }
                                 println!("Audio path set and verified decodable: {:?}, Duration: {:?} ms", p.display(), self.length);
                             }
@@ -121,7 +120,7 @@ impl AudioManager {
                             // store total duration if not already
                             if self.length.is_none() {
                                 if let Some(duration) = source.total_duration() {
-                                    self.length = Some(duration.as_secs_f64() * 1000.0);
+                                    self.length = Some(duration.as_millis() as f64);
                                 }
                             }
                             s.append(source);
@@ -190,7 +189,7 @@ impl AudioManager {
             if !s.is_paused() {
                 s.pause();
                 if let Some(start_instant) = self.playback_start_instant.take() {
-                    self.accumulated_play_time_ms += start_instant.elapsed().as_secs_f64() * 1000.0;
+                    self.accumulated_play_time_ms += start_instant.elapsed().as_millis() as f64;
                 }
                 self.is_audio_engine_paused = true;
                 println!(
@@ -213,8 +212,8 @@ impl AudioManager {
         } else {
             match Sink::try_new(&self.stream_handle) {
                 Ok(new_sink) => {
-                    new_sink.set_volume(self.volume as f32);
-                    new_sink.set_speed(self.rate as f32);
+                    new_sink.set_volume(self.volume);
+                    new_sink.set_speed(self.rate);
                     new_sink.pause();
                     self.sink = Some(new_sink);
                     println!("Audiomanager: New sink created on restart.");
@@ -235,7 +234,7 @@ impl AudioManager {
         if !self.is_audio_engine_paused {
             if let Some(start_instant) = self.playback_start_instant {
                 current_time = self.accumulated_play_time_ms
-                    + (start_instant.elapsed().as_secs_f64() * 1000.0 * self.rate);
+                    + (start_instant.elapsed().as_millis() as f32 * self.rate) as f64;
             }
         }
         // clamp time to total duration if available
@@ -258,33 +257,33 @@ impl AudioManager {
         self.length
     }
 
-    pub fn set_volume(&mut self, volume: f64) {
-        self.volume = volume.clamp(0.0, 1.5) as f64; // clamp volume
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.5); // clamp volume
         if let Some(s) = self.sink.as_mut() {
-            s.set_volume(self.volume as f32);
+            s.set_volume(self.volume);
         }
         println!("Audiomanager: Volume set to {}", self.volume);
     }
 
-    pub fn get_volume(&self) -> f64 {
+    pub fn get_volume(&self) -> f32 {
         self.volume
     }
 
-    pub fn set_rate(&mut self, rate: f64) {
+    pub fn set_rate(&mut self, rate: f32) {
         self.rate = rate.max(0.1); // prevent rate from being too low or zero
         if let Some(s) = self.sink.as_mut() {
-            s.set_speed(self.rate as f32);
+            s.set_speed(self.rate);
         }
         if !self.is_audio_engine_paused {
             if let Some(start_instant) = self.playback_start_instant.take() {
-                self.accumulated_play_time_ms += start_instant.elapsed().as_secs_f64() * 1000.0;
+                self.accumulated_play_time_ms += start_instant.elapsed().as_millis() as f64;
             }
             self.playback_start_instant = Some(Instant::now());
         }
         println!("Audiomanager: Rate set to {}", self.rate);
     }
 
-    pub fn get_rate(&self) -> f64 {
+    pub fn get_rate(&self) -> f32 {
         self.rate
     }
 
@@ -295,12 +294,12 @@ impl AudioManager {
 
 struct FieldPositions {
     // positions from top of screen
-    receptor_position_y: f64, // receptors position
-    hit_position_y: f64, // hit object target position
-    hold_hit_position_y: f64, // held hit object target position
-    hold_end_hit_position_y: f64, // LN end target position
-    timing_line_position_y: f64, // timing line position
-    long_note_size_adjustment: f64, // size adjustment for LN so LN end time snaps with start time
+    receptor_position_y: f32, // receptors position
+    hit_position_y: f32, // hit object target position
+    hold_hit_position_y: f32, // held hit object target position
+    hold_end_hit_position_y: f32, // LN end target position
+    timing_line_position_y: f32, // timing line position
+    long_note_size_adjustment: f32, // size adjustment for LN so LN end time snaps with start time
 }
 
 // snap colors
@@ -318,13 +317,13 @@ const BEAT_SNAPS: &[BeatSnap] = &[
 
 struct Skin {
     // skin settings
-    lane_width: f64, // width of each lane/column
-    note_width: f64, // width of each note
-    note_height: f64, // height of each note
-    hold_note_width: f64, // width of each hold note
-    hold_note_height: f64, // height of each hold note
-    receptors_y_position: f64, // y position of the receptors/hit line
-    scroll_speed: f64, // scroll speed of the notes
+    lane_width: f32, // width of each lane/column
+    note_width: f32, // width of each note
+    note_height: f32, // height of each note
+    hold_note_width: f32, // width of each hold note
+    hold_note_height: f32, // height of each hold note
+    receptors_y_position: f32, // y position of the receptors/hit line
+    scroll_speed: f32, // scroll speed of the notes
     rate_affects_scroll_speed: bool, // whether the rate multiplies the scroll speed
     draw_lanes: bool, // whether to draw the lanes
     wide_timing_lines: bool, // whether to draw timing lines to the sides of the screen
@@ -333,13 +332,15 @@ struct Skin {
 }
 
 const SKIN: Skin = Skin {
-    lane_width: 145.0, // 136
-    note_width: 145.0,
-    note_height: 36.0, // 36
-    hold_note_width: 145.0,
+    // lane_width: 136.0,
+    lane_width: 160.0,
+    note_width: 160.0,
+    note_height: 36.0,
+    hold_note_width: 160.0,
     hold_note_height: 36.0,
-    receptors_y_position: 226.0, // 226
-    scroll_speed: 320.0, // 200, // 20 in quaver
+    receptors_y_position: 226.0,
+    // scroll_speed: 200.0, // 20.0 in quaver
+    scroll_speed: 300.0,
     rate_affects_scroll_speed: false,
     draw_lanes: true,
     wide_timing_lines: true,
@@ -370,22 +371,15 @@ impl Mods {
     }
 }
 
-// anything representing a position on the track
-type Position = i64;
-
-// anything representing a time in milliseconds
-type Time = f64;
-
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 struct Map {
     audio_file: Option<String>,      // audio file name
-    song_preview_time: Option<f64>,  // time (ms) of the song where the preview starts
+    song_preview_time: Option<i32>,  // time (ms) of the song where the preview starts
     background_file: Option<String>, // background file name
     banner_file: Option<String>,     // mapset banner name
-    map_id: Option<f64>,             // unique Map Identifier (-1 if not submitted)
-    map_set_id: Option<f64>,         // unique Map Set identifier (-1 if not submitted)
+    map_id: Option<i32>,             // unique Map Identifier (-1 if not submitted)
+    map_set_id: Option<i32>,         // unique Map Set identifier (-1 if not submitted)
     #[serde(default)]
     mode: String,                    // game mode for this map {Keys4, Keys7}
     title: Option<String>,           // song title
@@ -402,8 +396,8 @@ struct Map {
     #[serde(rename = "BPMDoesNotAffectScrollVelocity")]
     #[serde(default)]
     bpm_does_not_affect_scroll_velocity: bool, // indicates if BPM changes affect SV
-    #[serde(default = "one_f64")]
-    initial_scroll_velocity: f64,    // the initial SV before the first SV change
+    #[serde(default = "one_f32")]
+    initial_scroll_velocity: f32,    // the initial SV before the first SV change
     #[serde(default)]
     has_scratch_key: bool,           // +1 scratch key (5/8 key play)
     #[serde(default)]
@@ -430,13 +424,13 @@ struct Map {
     #[serde(skip_deserializing)]
     file_path: String, // map file path
     #[serde(skip)]
-    time: Time, // current time in the map
+    time: f64, // current time in the map
     #[serde(skip)]
-    rate: f64,
+    rate: f32,
     #[serde(skip)]
     mods: Mods,
     #[serde(skip)]
-    length: Time, // length of the map in ms
+    length: f64, // length of the map in ms
 }
 
 impl Map {
@@ -477,7 +471,7 @@ impl Map {
             // start with first SV point (position = time * sv)
             let mut position = (timing_group.scroll_velocities[0].start_time
                 * timing_group.initial_scroll_velocity
-                * TRACK_ROUNDING) as Position;
+                * TRACK_ROUNDING) as i64;
             timing_group.scroll_velocities[0].cumulative_position = position;
 
             // loop through SV indexes 1 to SVs-1 (rest of SVs)
@@ -491,7 +485,7 @@ impl Map {
                 // distance between last and current SV, times the previous SV's multiplier
                 let distance = (current_sv.start_time - previous_sv.start_time) * multiplier;
 
-                position += (distance * TRACK_ROUNDING) as Position;
+                position += (distance * TRACK_ROUNDING) as i64;
                 timing_group.scroll_velocities[index].cumulative_position = position;
             }
         }
@@ -507,8 +501,8 @@ impl Map {
                 .unwrap();
 
             hit_object.start_position = timing_group.get_position_from_time(
-                hit_object.start_time,
-            );
+                hit_object.start_time as f64,
+            ) as f32;
 
             hit_object.hit_position = if hit_object.end_time.is_some() {
                 // LN
@@ -520,13 +514,9 @@ impl Map {
         }
     }
 
-    fn initialize_timing_lines(&mut self, field_positions: &FieldPositions) {
+    fn initialize_timing_lines(&mut self) {
         // creates timing lines based on timing points' signatures and BPMs
         self.timing_lines.clear();
-
-        let tg = self.timing_groups
-            .get(DEFAULT_TIMING_GROUP_ID)
-            .unwrap();
 
         // loop through timing points
         for tp_index in 0..self.timing_points.len() {
@@ -543,7 +533,7 @@ impl Map {
                 self.timing_points[tp_index + 1].start_time - 1.0
             } else {
                 // last timing point, end at map length
-                self.length
+                self.length as f32
             };
 
             // time signature (3/4 or 4/4)
@@ -551,10 +541,10 @@ impl Map {
                 .time_signature
                 .as_ref()
                 .cloned()
-                .unwrap_or(TimeSignature::Quadruple) as u32 as f64;
+                .unwrap_or(TimeSignature::Quadruple) as u32 as f32;
 
             // "max possible sane value for timing lines" - quaver devs
-            const MAX_BPM: f64 = 9999.0;
+            const MAX_BPM: f32 = 9999.0;
             let ms_per_beat = 60000.0 / MAX_BPM.min(self.timing_points[tp_index].bpm.abs());
             // how many ms between measures/timing lines
             let ms_increment = signature * ms_per_beat;
@@ -564,15 +554,17 @@ impl Map {
 
             while current_time < end_time {
                 // position for the timing line
-                let start_position = tg.get_position_from_time(current_time);
+                let start_position = self.timing_groups
+                    .get(DEFAULT_TIMING_GROUP_ID)
+                    .unwrap()
+                    .get_position_from_time(current_time as f64);
 
                 // create and add new timing line
                 self.timing_lines.push(
                     TimingLine {
                         start_time: current_time,
                         start_position: start_position,
-                        current_track_position: 0,
-                        hit_position: field_positions.timing_line_position_y,
+                        current_track_position: 0.0,
                     }
                 );
 
@@ -630,7 +622,7 @@ impl Map {
         }
     }
 
-    fn update_track_position(&mut self, time: Time) {
+    fn update_track_position(&mut self, time: f64) {
         // update current track position of hit objects in each timing group
         self.time = time;
         for timing_group in self.timing_groups.values_mut() {
@@ -644,7 +636,7 @@ impl Map {
         let speed = SKIN.scroll_speed;
         let rate_scaling = 1.0
             + (self.rate - 1.0)
-            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f64 / 100.0);
+            * (SKIN.normalize_scroll_velocity_by_rate_percentage as f32 / 100.0);
         let adjusted_scroll_speed = (speed * rate_scaling).clamp(50.0, 1000.0);
         let scaling_factor = 1920.0 / 1366.0; // quaver's scaling
 
@@ -653,7 +645,7 @@ impl Map {
             * scaling_factor; // * base_to_virtual_ratio
 
         for timing_group in self.timing_groups.values_mut() {
-            timing_group.scroll_speed = scroll_speed;
+            timing_group.update_scroll_speed(scroll_speed);
         }
     }
 
@@ -664,12 +656,7 @@ impl Map {
             .get_mut(DEFAULT_TIMING_GROUP_ID)
             .unwrap();
         for timing_line in &mut self.timing_lines {
-            // timing_line.current_track_position = (timing_group.current_track_position - timing_line.start_position);
-            timing_line.current_track_position = timing_group.get_object_position(
-                timing_line.hit_position,
-                timing_line.start_position,
-                true,
-            );
+            timing_line.current_track_position = (timing_group.current_track_position - timing_line.start_position) as f32;
         }
     }
 
@@ -694,15 +681,11 @@ impl Map {
                 hit_object.previous_positions.pop();
             }
 
-            hit_object.position = timing_group.get_object_position(
-                hit_object.hit_position,
-                hit_object.start_position,
-                true,
-                );
+            hit_object.position = timing_group.get_hit_object_position(hit_object.hit_position, hit_object.start_position)
         }
     }
 
-    fn get_key_count(&self, include_scratch: bool) -> i64 {
+    fn get_key_count(&self, include_scratch: bool) -> i32 {
         // returns the number of keys in the map
         let mut key_count = match self.mode.as_str() {
             "Keys4" => 4,
@@ -722,18 +705,16 @@ impl Map {
 trait HasStartTime {
 
     // for objects with a start time
-    fn start_time(&self) -> Time;
+    fn start_time(&self) -> f32;
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct TimingLine {
     #[serde(default)]
-    start_time: Time, // time when the timing line reaches the receptor
+    start_time: f32, // time when the timing line reaches the receptor
     #[serde(default)]
-    start_position: Position, // the timing line's position offset on track
+    start_position: i64, // the timing line's position offset on track
     #[serde(default)]
-    current_track_position: Position, // track position; >0 = hasnt passed receptors
-    #[serde(skip)]
-    hit_position: f64, // position of the timing line on the screen
+    current_track_position: f32, // track position; >0 = hasnt passed receptors
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -742,16 +723,26 @@ struct TimingPoint {
     // sets values until next timing point
     // used for bpm change, or affine
     #[serde(default)]
-    start_time: Time, // start time (ms)
-    bpm: f64,
+    start_time: f32, // start time (ms)
+    bpm: f32,
     time_signature: Option<TimeSignature>,
     #[serde(default)]
     hidden: bool, // show timing lines
 }
 
 impl HasStartTime for TimingPoint {
-    fn start_time(&self) -> Time {
+    fn start_time(&self) -> f32 {
         self.start_time
+    }
+}
+
+impl TimingPoint {
+    fn milliseconds_per_beat(&self) -> f32 {
+        if self.bpm != 0.0 {
+            60000.0 / self.bpm
+        } else {
+            0.0
+        }
     }
 }
 
@@ -760,17 +751,17 @@ impl HasStartTime for TimingPoint {
 struct ControlPoint {
     // represents either an SV or SSF point
     #[serde(default)]
-    start_time: Time,
-    #[serde(default)]
-    multiplier: f64,
+    start_time: f32,
+    #[serde(default = "one_f32")]
+    multiplier: f32,
     #[serde(skip_deserializing)]
-    length: Option<Time>, // none if last point
+    length: Option<f32>, // none if last point
     #[serde(skip_deserializing)]
-    cumulative_position: Position, // cumulative distance from the start of the map
+    cumulative_position: i64, // cumulative distance from the start of the map
 }
 
 impl HasStartTime for ControlPoint {
-    fn start_time(&self) -> Time {
+    fn start_time(&self) -> f32 {
         self.start_time
     }
 }
@@ -780,9 +771,9 @@ impl HasStartTime for ControlPoint {
 struct HitObject {
     // a note
     #[serde(default)]
-    start_time: Time,
-    end_time: Option<Time>, // if Some, then its an LN
-    lane: i64,
+    start_time: f32,
+    end_time: Option<f32>, // if Some, then its an LN
+    lane: i32,
     key_sounds: Vec<KeySound>, // key sounds to play when this object is hit
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_hit_sounds")]
@@ -793,19 +784,19 @@ struct HitObject {
     #[serde(skip)]
     snap_index: usize, // index for snap color
     #[serde(skip)]
-    hold_end_hit_position: f64, // position for LN ends
+    hold_end_hit_position: f32, // position for LN ends
     #[serde(skip)]
-    current_long_note_body_size: f64, // current size of the LN body
+    current_long_note_body_size: f32, // current size of the LN body
     #[serde(skip)]
     scroll_direction: bool, // true for upscroll, false for downscroll
     #[serde(skip)]
-    hit_position: f64, // where the note is "hit", calculated from hit body height and hit position offset
+    hit_position: f32, // where the note is "hit", calculated from hit body height and hit position offset
     #[serde(skip)]
-    start_position: Position, // track position at start_time (in timing group)
+    start_position: f32, // track position at start_time (in timing group)
     #[serde(skip)]
-    position: Position, // live map position, calculated with timing group
+    position: f32, // live map position, calculated with timing group
     #[serde(skip)]
-    previous_positions: Vec<Position>, // previous positions, used for rendering effects
+    previous_positions: Vec<f32>, // previous positions, used for rendering effects
     
 }
 
@@ -813,7 +804,7 @@ struct HitObject {
     //     TimingGroupController.ScrollSpeed / HitObjectManagerKeys.TrackRounding;
 
 impl HasStartTime for HitObject {
-    fn start_time(&self) -> Time {
+    fn start_time(&self) -> f32 {
         self.start_time
     }
 }
@@ -829,8 +820,8 @@ struct KeySound {
 #[serde(rename_all = "PascalCase")]
 struct TimingGroup {
     // group of hitobjects with seperate effects
-    #[serde(default = "one_f64")]
-    initial_scroll_velocity: f64,
+    #[serde(default = "one_f32")]
+    initial_scroll_velocity: f32,
     #[serde(default)]
     scroll_velocities: Vec<ControlPoint>,
     #[serde(default)]
@@ -838,17 +829,17 @@ struct TimingGroup {
     color_rgb: Option<String>,
     // info for playback
     #[serde(skip)]
-    current_track_position: Position, // current playback position
-    #[serde(default = "one_f64")]
-    current_ssf_factor: f64, // current SSF multiplier
+    current_track_position: i64, // current playback position
+    #[serde(default = "one_f32")]
+    current_ssf_factor: f32, // current SSF multiplier
     #[serde(skip)]
-    scroll_speed: f64, // speed at which objects travel across the screen
+    scroll_speed: f32, // speed at which objects travel across the screen
 }
 
 impl TimingGroup {
-    fn get_scroll_speed_factor_from_time(&self, time: Time) -> f64 {
+    fn get_scroll_speed_factor_from_time(&self, time: f64) -> f32 {
         // gets the SSF multiplier at a time, with linear interpolation
-        let ssf_index = index_at_time(&self.scroll_speed_factors, time);
+        let ssf_index = index_at_time(&self.scroll_speed_factors, time as f32);
  
         match ssf_index {
             None => {
@@ -864,66 +855,61 @@ impl TimingGroup {
 
                 let next_ssf = &self.scroll_speed_factors[index + 1];
                 // lerp between this and next point based on time between
-                let multiplier = lerp(
+                return lerp(
                     ssf.multiplier,
                     next_ssf.multiplier,
-                    ((time - ssf.start_time) / (next_ssf.start_time - ssf.start_time))
-                );
-                return multiplier;
+                    ((time as f32 - ssf.start_time) / (next_ssf.start_time - ssf.start_time))
+                )
             }
         }
     }
 
-    fn get_position_from_time(&self, time: Time) -> Position {
+    fn get_position_from_time(&self, time: f64) -> i64 {
         // calculates the timing group's track position with time and SV
-        let sv_index = index_at_time(&self.scroll_velocities, time);
+        let sv_index = index_at_time(&self.scroll_velocities, time as f32);
 
         match sv_index {
             None => {
                 // before first SV point or no SVs, so use initial scroll velocity
-                return (time
+                return (time as f32
                     * self.initial_scroll_velocity
                     * TRACK_ROUNDING
-                ) as Position;
+                ) as i64;
             }
             Some(index) => {
                 // get the track position at the start of the current SV point
                 let mut current_position = self.scroll_velocities[index].cumulative_position;
 
                 // add the distance between the start of the current SV point and the time
-                current_position += ((time - self.scroll_velocities[index].start_time)
+                current_position += ((time as f32 - self.scroll_velocities[index].start_time)
                     * self.scroll_velocities[index].multiplier
-                    * TRACK_ROUNDING) as Position;
+                    * TRACK_ROUNDING) as i64;
                 return current_position;
             }
         }
     }
 
-    fn get_object_position(&self, hit_position: f64, initial_position: Position, use_ssf: bool) -> Position {
+    fn update_scroll_speed(&mut self, scroll_speed: f32) {
+        // update scroll speed with ssf factor
+        self.scroll_speed = scroll_speed * self.current_ssf_factor;
+    }
+
+    fn get_hit_object_position(&self, hit_position: f32, initial_position: f32) -> f32 {
         // calculates the position of a hit object with a position offset
         // note: signs were swapped in quaver?
-        let mut scroll_speed = if SKIN.downscroll {
-            -self.scroll_speed
-        } else {
+        let scroll_speed = if SKIN.downscroll {
             self.scroll_speed
+        } else {
+            -self.scroll_speed
         };
 
-        if use_ssf {
-            // apply SSF factor
-            scroll_speed *= self.current_ssf_factor;
-        }
+        let position =  hit_position + (
+            (initial_position - self.current_track_position as f32)
+            * -self.scroll_speed 
+            / TRACK_ROUNDING
+        );
 
-        // let position = (hit_position as i64)
-        //     + (
-        //         (initial_position - self.current_track_position)
-        //         * -self.scroll_speed as i64
-        //         / TRACK_ROUNDING as i64
-        // );
-
-
-        let distance = (initial_position as f64) - (self.current_track_position as f64);
-        let position = hit_position + (distance * scroll_speed / TRACK_ROUNDING); 
-        return (position as Position);
+        return position;
     }
 }
 
@@ -968,17 +954,17 @@ impl Default for HitSounds {
 struct SoundEffect {
     // sound effect for the map
     #[serde(default)]
-    start_time: Time, // the time at which to play the sound sample
+    start_time: f32, // the time at which to play the sound sample
     #[serde(default)]
-    sample: f64, // the one-based index of the sound sample in the CustomAudioSamples array
+    sample: i32, // the one-based index of the sound sample in the CustomAudioSamples array
     #[serde(default)]
-    volume: f64, // the volume of the sound sample (defaults to 100)
+    volume: i32, // the volume of the sound sample (defaults to 100)
     #[serde(default)]
     sound_effect: String,
 }
 
 impl HasStartTime for SoundEffect {
-    fn start_time(&self) -> Time {
+    fn start_time(&self) -> f32 {
         self.start_time
     }
 }
@@ -1005,25 +991,18 @@ where
     }
 }
 
+
 fn one_f32() -> f32 { 
     return 1.0;
 }
 
-fn one_f64() -> f64 { 
-    return 1.0;
-}
-
-fn zero_f64() -> f64 {
-    return 0.00;
-}
-
 // linear interpolation between a and b based on time t
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
 // returns index of currently active item (start_time <= time)
-fn index_at_time<T: HasStartTime>(list: &[T], time: Time) -> Option<usize> {
+fn index_at_time<T: HasStartTime>(list: &[T], time: f32) -> Option<usize> {
     // binary search
     if list.is_empty() || list[0].start_time() > time {
         // no items before or list is empty
@@ -1049,7 +1028,7 @@ fn index_at_time<T: HasStartTime>(list: &[T], time: Time) -> Option<usize> {
 }
 
 // returns currently active item (start_time <= time)
-fn object_at_time<T: HasStartTime>(list: &[T], time: Time) -> Option<&T> {
+fn object_at_time<T: HasStartTime>(list: &[T], time: f32) -> Option<&T> {
     index_at_time(list, time).map(|i| &list[i])
 }
 
@@ -1072,10 +1051,8 @@ fn set_reference_positions() -> FieldPositions {
 
     // let hit_object_offset = lane_size * SKIN.note_height / SKIN.note_width;
     let hit_object_offset = 0.0; // temp
-    // let hold_hit_object_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_hit_object_offset = 0.0; // temp
-    // let hold_end_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_end_offset = 0.0; // temp
+    let hold_hit_object_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
+    let hold_end_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
     let receptors_height = 0.0; // temp
     let receptors_width = lane_size; // temp
     // let receptor_offset = lane_size * receptors_height / receptors_width;
@@ -1103,40 +1080,40 @@ struct FrameState<'a> {
 }
 
 trait Draw {
-    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: macroquad::color::Color);
-    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: macroquad::color::Color);
-    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: 
+    fn draw_rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, color: macroquad::color::Color);
+    fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: macroquad::color::Color);
+    fn draw_circle(&mut self, x: f32, y: f32, radius: f32, color: 
     macroquad::color::Color);
-    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: macroquad::color::Color);
-    fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color);
-    fn screen_height(&self) -> f64;
-    fn screen_width(&self) -> f64;
+    fn draw_circle_outline(&mut self, x: f32, y: f32, radius: f32, thickness: f32, color: macroquad::color::Color);
+    fn draw_text(&mut self, text: &str, x: f32, y: f32, size: f32, color: macroquad::color::Color);
+    fn screen_height(&self) -> f32;
+    fn screen_width(&self) -> f32;
 }
 
 struct MacroquadDraw;
 
 impl Draw for MacroquadDraw {
-    fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_rectangle(x as f32, y as f32, w as f32, h as f32, color);
+    fn draw_rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, color: macroquad::color::Color) {
+        macroquad::shapes::draw_rectangle(x, y, w, h, color);
     }
-    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, thickness: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_line(x1 as f32, y1 as f32, x2 as f32, y2 as f32, thickness as f32, color);
+    fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: macroquad::color::Color) {
+        macroquad::shapes::draw_line(x1, y1, x2, y2, thickness, color);
     }
-    fn draw_circle(&mut self, x: f64, y: f64, radius: f64, color: 
+    fn draw_circle(&mut self, x: f32, y: f32, radius: f32, color: 
     macroquad::color::Color) {
-        macroquad::shapes::draw_circle(x as f32, y as f32, radius as f32, color);
+        macroquad::shapes::draw_circle(x, y, radius, color);
     }
-    fn draw_circle_outline(&mut self, x: f64, y: f64, radius: f64, thickness: f64, color: macroquad::color::Color) {
-        macroquad::shapes::draw_circle_lines(x as f32, y as f32, radius as f32, thickness as f32, color);
+    fn draw_circle_outline(&mut self, x: f32, y: f32, radius: f32, thickness: f32, color: macroquad::color::Color) {
+        macroquad::shapes::draw_circle_lines(x, y, radius, thickness, color);
     }
-    fn draw_text(&mut self, text: &str, x: f64, y: f64, size: f64, color: macroquad::color::Color) {
-        macroquad::text::draw_text(text, x as f32, y as f32, size as f32, color);
+    fn draw_text(&mut self, text: &str, x: f32, y: f32, size: f32, color: macroquad::color::Color) {
+        macroquad::text::draw_text(text, x, y, size, color);
     }
-    fn screen_height(&self) -> f64 {
-        macroquad::window::screen_height() as f64
+    fn screen_height(&self) -> f32 {
+        macroquad::window::screen_height()
     }
-    fn screen_width(&self) -> f64 {
-        macroquad::window::screen_width() as f64
+    fn screen_width(&self) -> f32 {
+        macroquad::window::screen_width()
     }
 }
 
@@ -1150,77 +1127,82 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     state.map.update_hit_objects();
 
     // reference/base screen size
-    // let base_height = 1440.0;
-    // let base_width = 2560.0;
+    let base_height = 1440.0;
+    let base_width = 2560.0;
 
     // for scaling
     let window_height = draw.screen_height();
     let window_width = draw.screen_width();
-    // let base_to_virtual_ratio = window_height / base_height;
+    let base_to_virtual_ratio = window_height / base_height;
+
+    // background
+    draw.draw_rectangle(
+        0.0,
+        0.0,
+        window_width,
+        window_height,
+        macroquad::color::BLACK,
+    );
 
     let num_lanes = state.map.get_key_count(false);
-    let playfield_width = num_lanes as f64 * SKIN.lane_width;
+    let playfield_width = num_lanes as f32 * SKIN.lane_width;
     let playfield_x = (window_width - playfield_width) / 2.0;
 
-    // receptors (above notes)
-    // for i in 0..4 {
-    //     // draw receptors
-    //     let receptor_x = playfield_x
-    //         + (i as f64 * SKIN.lane_width)
-    //         + (SKIN.lane_width / 2.0); // center in lane;
-
-    //     draw.draw_circle_outline(
-    //         receptor_x,
-    //         window_height + state.field_positions.receptor_position_y,
-    //         SKIN.note_width / 2.2,
-    //         2.0,
-    //         GRAY,
-    //     );
-    // }
-
-    draw.draw_line(
-        0.0,
-        window_height + state.field_positions.receptor_position_y,
-        window_width,
-        window_height + state.field_positions.receptor_position_y,
-        3.0,
-        GRAY,
-    );
+    // PER TIMING GROUP: USE SCROLL SPEED * CURRENTSSF 
 
     let line_color = GRAY;
     let line_thickness = 1.0;
 
     // timing lines
-    for timing_line in &state.map.timing_lines {
-        let timing_line_y = (timing_line.current_track_position as f64) + window_height;
+    // for timing_line in &state.map.timing_lines {
+    //     let timing_group = state.map.timing_groups.get(DEFAULT_TIMING_GROUP_ID).unwrap();
 
-        draw.draw_line(
-            if SKIN.wide_timing_lines {
-                0.0
-            } else {
-                playfield_x
-            },
-            timing_line_y,
-            if SKIN.wide_timing_lines {
-                window_width
-            } else {
-                playfield_x + (num_lanes as f64 * SKIN.lane_width)
-            },
-            timing_line_y,
-            line_thickness,
-            line_color,
-        );
-    }
+    //     // let sv_index = index_at_time(&timing_group.scroll_velocities, timing_line.start_time);
+    //     // let track_position = timing_group.get_position_from_time(timing_line.start_time as f64, sv_index);
+
+    //     // // how far in track units from the receptor (current time)
+    //     // let delta_track = track_position - timing_group.current_track_position;
+
+    //     // let pixels_per_effective_ms = scroll_speed / 1000.0;
+    //     // let pixel_offset_from_receptor = delta_track as f32 * pixels_per_effective_ms;
+    //     // let timing_line_y = (window_height - HIT_LINE_Y_POS_PX) - pixel_offset_from_receptor;
+
+
+    //     // Y = TrackOffset + (CurrentTrackPosition * (ScrollDirection.Equals(ScrollDirection.Down) ? globalGroupController.ScrollSpeed : -globalGroupController.ScrollSpeed) / HitObjectManagerKeys.TrackRounding);
+    //     let ss = timing_group.scroll_speed * timing_group.current_ssf_factor;
+    //     let timing_line_y = (timing_line.track_offset as f32)
+    //         + (timing_line.current_track_position as f32 * 
+    //             (if SKIN.downscroll {ss} else {-ss}) / TRACK_ROUNDING
+    //         );
+
+    //     draw.draw_line(
+    //         if SKIN.wide_timing_lines {
+    //             0.0
+    //         } else {
+    //             playfield_x
+    //         },
+    //         timing_line_y,
+    //         if SKIN.wide_timing_lines {
+    //             window_width
+    //         } else {
+    //             playfield_x + (num_lanes as f32 * SKIN.lane_width)
+    //         },
+    //         timing_line_y,
+    //         line_thickness,
+    //         line_color,
+    //     );
+    // }
 
     // notes
     for index in 0..state.map.hit_objects.len() {
+        // let note = &mut state.map.hit_objects[index].clone();
         let note = &state.map.hit_objects[index];
-        if note.start_time <= state.map.time {
-            // past receptors, skip rendering
-            continue
-        };
+        // let mut note_y = note.position;
 
-        let note_y = (note.position as f64) + window_height; // real hitbox
+        // note_y = -note_y;
+        // note_y = note_y + 630.0; // laptop
+        // note_y = note_y + 920.0; // pc
+        let note_y = note.position + window_height; // real hitbox
 
         // calculate x position based on lane (1-indexed in quaver)
         // adjust lane to be 0-indexed for calculation
@@ -1231,70 +1213,89 @@ fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
         };
 
         let note_x = playfield_x
-            + (lane_index as f64 * SKIN.lane_width)
+            + (lane_index as f32 * SKIN.lane_width)
             + (SKIN.lane_width / 2.0) // center in lane
             - (SKIN.note_width / 2.0);
+
+        // snap colors
+        let color = BEAT_SNAPS[note.snap_index].color;
+
+        // if past receptors
+        let color = if note.start_time > state.map.time as f32 {
+            BEAT_SNAPS[note.snap_index].color
+        } else {
+            // macroquad::color::DARKGRAY
+            macroquad::color::BLACK
+        };
 
         let mut note_top_offset = SKIN.note_height / 2.0;
         let mut note_bottom_offset = SKIN.note_height / 2.0;
         let middle_position = note_y - SKIN.note_height / 2.0;
-        let frame_behind = 0;
-        let stretch_limit = SKIN.note_height * 8.0; // max stretch limit
-
-        // calculate stretch from previous positions
-        for i in 0..note.previous_positions.len() {
-            if i >= frame_behind {
-                break;
-            }
-            // pos = moving down (top), neg = moving up (bottom)
-            let stretch = (note.position - note.previous_positions[i]) as f64;
-
-            if stretch.abs() > stretch_limit {
-                // stretch is too big, ignore
-                continue;
-            }
+        let stretch = note.position - note.previous_positions[4];
+        // pos = moving down, neg = moving up
+        if stretch.abs() > note_top_offset
+            && stretch.abs() < SKIN.note_height * 8.0 {
             if stretch > 0.0 {
-                note_top_offset = note_top_offset.max(stretch);
+                note_top_offset = stretch;
             } else {
-                // moving up
-                note_bottom_offset = note_bottom_offset.max(-stretch);
+                note_bottom_offset = -stretch;
             }
-        }
+        }  
 
-        // snap colors
-        let mut color = BEAT_SNAPS[note.snap_index].color;
 
-        draw.draw_rectangle(
-            note_x,
-            middle_position  - note_top_offset,
-            SKIN.note_width,
-            note_top_offset + note_bottom_offset,
-            color,
-        );
-
-        // draw.draw_circle(
-        //     note_x + (SKIN.note_width / 2.0),
-        //     middle_position,
-        //     SKIN.note_width / 2.4,
+        // draw.draw_rectangle(
+        //     note_x,
+        //     middle_position  - note_top_offset,
+        //     SKIN.note_width,
+        //     note_top_offset + note_bottom_offset,
         //     color,
         // );
-
+        draw.draw_circle(
+            note_x + (SKIN.note_width / 2.0),
+            middle_position,
+            SKIN.note_width / 2.4,
+            color,
+        );
         // draw.draw_rectangle( // middle of note
         //     note_x,
         //     middle_position,
         //     SKIN.note_width,
         //     1.0,
-        //     WHITE,
+        //     macroquad::color::WHITE,
         // );        
         // draw.draw_rectangle( // hitbox
         //     note_x,
         //     note_y,
         //     SKIN.note_width,
         //     1.0,
-        //     WHITE,
+        //     macroquad::color::WHITE,
         // );
 
     }
+
+    // receptors (above notes)
+    for i in 0..4 {
+        // draw receptors
+        let receptor_x = playfield_x
+            + (i as f32 * SKIN.lane_width)
+            + (SKIN.lane_width / 2.0); // center in lane;
+
+        draw.draw_circle_outline(
+            receptor_x,
+            window_height + state.field_positions.receptor_position_y,
+            SKIN.note_width / 2.2,
+            2.0,
+            macroquad::color::GRAY,
+        );
+    }
+    // draw.draw_line(
+    //     0.0,
+    //     window_height + state.field_positions.receptor_position_y,
+    //     window_width,
+    //     window_height + state.field_positions.receptor_position_y,
+    //     2.0,
+    //     macroquad::color::GRAY,
+    // );
 }
 
 fn window_conf() -> Conf {
@@ -1308,8 +1309,7 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut is_fullscreen: bool = false;
-    let song_name = "funky";
+    let mut is_fullscreen = false;
 
     // --- audio setup ---
     let mut audio_manager = AudioManager::new().map_err(|e| {
@@ -1319,7 +1319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- map loading ---
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let map_folder_path = project_dir.join("songs/").join(song_name);
+    let map_folder_path = project_dir.join("songs/snuffy");
     let map_file_name_option = fs::read_dir(&map_folder_path)
         .map_err(|e| format!("Failed to read map directory {:?}: {}", map_folder_path, e))?
         .filter_map(Result::ok)
@@ -1371,23 +1371,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     map.sort();
     map.initialize_control_points();
     map.initialize_hit_objects(&field_positions);
-    map.initialize_timing_lines(&field_positions);
+    map.initialize_timing_lines();
     map.initialize_beat_snaps();
 
-    let total_hit_objects = map.hit_objects.len();
-    let total_timing_points = map.timing_points.len();
     let total_svs = map.timing_groups.values().map(|g| g.scroll_velocities.len()).sum::<usize>();
     let total_ssfs = map.timing_groups.values().map(|g| g.scroll_speed_factors.len()).sum::<usize>();
-    let total_timing_groups = map.timing_groups.len();
-    let total_timing_lines = map.timing_lines.len();
     println!(
-        "Map loaded successfully: {} Hit Objects, {} Timing Points, {} SVs, {} SSFs, {} Timing Groups, {} Timing Lines",
-        total_hit_objects,
-        total_timing_points,
+        "Map loaded successfully: {} Hit Objects, {} Timing Points, {} SVs, {} SSFs, {} Timing Groups",
+        map.hit_objects.len(),
+        map.timing_points.len(),
         total_svs,
         total_ssfs,
-        total_timing_groups,
-        total_timing_lines,
+        map.timing_groups.len()
     );
 
     // this is the visual play state, audio is handled by audio_manager
@@ -1412,6 +1407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if is_key_pressed(KeyCode::F11) || is_key_pressed(KeyCode::F) {
             is_fullscreen = !is_fullscreen;
             set_fullscreen(is_fullscreen);
+
         }
         if is_key_pressed(KeyCode::Space) {
             is_playing_visuals = !is_playing_visuals;
@@ -1453,53 +1449,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             field_positions: &field_positions,
         };
 
-        // --------- render stuff --------
-
-        clear_background(BLACK); // resets frame to all black
         render_frame(&mut frame_state, &mut macroquad_draw);
 
-        // -------- draw ui / debug info --------
-
+        // --- draw ui / debug info ---
         let mut y_offset = 20.0;
         let line_height = 20.0;
 
-        if let (
-            Some(title),
-            Some(artist),
-            Some(difficulty),
-            Some(creator),
-        ) = (
-            &map.title,
-            &map.artist,
-            &map.difficulty_name, 
-            &map.creator,
-        ) {
-            draw_text(
-                &format!("Map: {} - {} [{}] by {}", title, artist, difficulty, creator),
-                10.0,
-                y_offset,
-                20.0,
-                WHITE,
-            );
-            y_offset += line_height;
-        }
-
+        let total_duration_str = match audio_manager.get_total_duration_ms() {
+            Some(d) => format!("{:.2}s", d / 1000.0),
+            None => "N/A".to_string(),
+        };
         draw_text(
             &format!(
-                "{} Notes, {} SVs, {} SSFs, {} Groups, {} Timing Points, {} Timing Lines",
-                total_hit_objects,
-                total_svs,
-                total_ssfs,
-                total_timing_groups,
-                total_timing_points,
-                total_timing_lines,
+                "Time: {:.2}s / {}",
+                time / 1000.0,
+                total_duration_str
             ),
             10.0,
             y_offset,
             20.0,
             WHITE,
         );
-        y_offset += line_height;
         y_offset += line_height;
 
         let visual_state_text = if is_playing_visuals {
@@ -1508,11 +1478,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Paused"
         };
         let audio_actual_state_text = if audio_manager.is_playing() {
-            "Playing"
+            "Audio engine playing"
         } else if audio_manager.sink.as_ref().map_or(false, |s| s.is_paused()) {
-            "Paused"
+            "Audio engine paused"
         } else {
-            "Stopped/empty"
+            "Audio engine stopped/empty"
         };
         draw_text(
             &format!(
@@ -1539,38 +1509,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         y_offset += line_height;
 
-        let total_duration_str = match audio_manager.get_total_duration_ms() {
-            Some(d) => format!("{:.2}s", d / 1000.0),
-            None => "N/A".to_string(),
-        };
-        draw_text(
-            &format!(
-                "Time: {:.2}s / {}",
-                time / 1000.0,
-                total_duration_str
-            ),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
+
+        if let (Some(title), Some(artist), Some(difficulty)) = (&map.title, &map.artist, &map.difficulty_name) {
+            draw_text(
+                &format!("Map: {} - {} [{}]", title, artist, difficulty),
+                10.0,
+                y_offset,
+                20.0,
+                LIGHTGRAY,
+            );
+            y_offset += line_height;
+        }
+        draw_text(&format!("FPS: {}", get_fps()), 10.0, y_offset, 20.0, WHITE);
         y_offset += line_height;
 
-        let fps = format!("{:<3}", get_fps());
         let elapsed = start_instant.elapsed().as_secs_f64();
-        let avg_fps = if elapsed > 0.0 {
-            frame_count as f64 / elapsed
-        } else {
-            0.0
-        };
-        draw_text(
-            &format!("FPS: {} | {:.2}", fps, avg_fps),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
+        if elapsed > 0.0 {
+            let avg_fps = frame_count as f64 / elapsed;
+            draw_text(
+                &format!("Avg FPS: {:.2}", avg_fps),
+                10.0,
+                y_offset,
+                20.0,
+                WHITE,
+            );
+            y_offset += line_height;
+        }
 
         if let Some(err_msg) = audio_manager.get_error() {
             draw_text(
