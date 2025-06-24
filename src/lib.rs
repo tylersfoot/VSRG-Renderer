@@ -37,4 +37,14 @@ pub fn sort_by_start_time<T: HasStartTime>(items: &mut [T]) {
 
 pub mod constants;
 pub mod map;
+#[cfg(feature = "audio")]
 pub mod audio_manager;
+#[cfg(not(feature = "audio"))]
+pub mod audio_manager_stub;
+
+#[cfg(feature = "audio")]
+pub use audio_manager::AudioManager;
+#[cfg(not(feature = "audio"))]
+pub use audio_manager_stub::AudioManager;
+#[cfg(not(feature = "audio"))]
+pub use audio_manager_stub as audio_manager;

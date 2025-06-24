@@ -18,3 +18,14 @@ Flags:
 - `--mirror` mirror notes horizontally
 - `--no-sv` ignore scroll velocity changes
 - `--no-ssf` ignore scroll speed factor changes
+
+### Cargo Features
+
+The crate provides an optional `audio` feature that enables sound playback via
+the `rodio` library. This feature is enabled by default. To compile without
+audio support (and avoid linking against system audio libraries), disable
+default features:
+
+```bash
+cargo test --no-default-features
+```

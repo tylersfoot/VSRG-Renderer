@@ -1198,6 +1198,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hound",
  "log",
  "macroquad",
  "rodio",

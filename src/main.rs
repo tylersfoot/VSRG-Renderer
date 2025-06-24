@@ -1,12 +1,16 @@
-// #![allow(unused)]
-// #![allow(clippy::needless_return)]
+#[cfg(feature = "audio")]
 mod audio_manager;
+#[cfg(not(feature = "audio"))]
+mod audio_manager_stub;
 mod constants;
 mod draw;
 mod map;
 mod render;
 
+#[cfg(feature = "audio")]
 use audio_manager::AudioManager;
+#[cfg(not(feature = "audio"))]
+use audio_manager_stub::AudioManager;
 use draw::MacroquadDraw;
 use map::Map;
 use render::{render_frame, FrameState, set_reference_positions};
@@ -292,14 +296,23 @@ pub async fn main() -> anyhow::Result<()> {
         };
         let audio_actual_state_text = if audio_manager.is_playing() {
             "Playing"
-        } else if audio_manager
-            .sink
-            .as_ref()
-            .is_some_and(rodio::Sink::is_paused)
-        {
-            "Paused"
         } else {
-            "Stopped/empty"
+            #[cfg(feature = "audio")]
+            {
+                if audio_manager
+                    .sink
+                    .as_ref()
+                    .is_some_and(rodio::Sink::is_paused)
+                {
+                    "Paused"
+                } else {
+                    "Stopped/empty"
+                }
+            }
+            #[cfg(not(feature = "audio"))]
+            {
+                "Paused"
+            }
         };
         draw_text(
             &format!(
