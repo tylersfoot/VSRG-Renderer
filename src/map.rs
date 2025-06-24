@@ -2,12 +2,12 @@ use std::{
     collections::{HashMap, VecDeque},
     mem::take,
 };
-
 use serde::{Deserialize, Serialize};
-
 use crate::constants::{
     FieldPositions, BEAT_SNAPS, DEFAULT_TIMING_GROUP_ID, SKIN, TRACK_ROUNDING,
 };
+use anyhow::{bail, Result};
+use log::warn;
 use crate::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time};
 
 // anything representing a position on the track
@@ -142,32 +142,45 @@ impl Map {
         }
     }
 
-    pub fn initialize_hit_objects(&mut self, field_positions: &FieldPositions) {
+    pub fn initialize_hit_objects(&mut self, field_positions: &FieldPositions) -> Result<()> {
         // initialize the hit objects
         // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L161
         for hit_object in &mut self.hit_objects {
-            let timing_group = self
-                .timing_groups
-                .get_mut(hit_object.timing_group.as_ref().unwrap())
-                .unwrap();
-
-            hit_object.start_position = timing_group.get_position_from_time(hit_object.start_time);
-
-            hit_object.hit_position = if hit_object.end_time.is_some() {
-                // LN
-                field_positions.hold_end_hit_position_y
-            } else {
-                field_positions.hit_position_y
+            let Some(group_id) = hit_object.timing_group.as_ref() else {
+                warn!("Hit object at time {} has no timing group", hit_object.start_time);
+                continue;
             };
-            hit_object.hold_end_hit_position = field_positions.hold_end_hit_position_y;
+
+            let Some(timing_group) = self.timing_groups.get_mut(group_id) else {
+                warn!(
+                    "Timing group '{}' not found for hit object at time {}",
+                    group_id,
+                    hit_object.start_time
+                );
+                continue;
+            };
+
+            hit_object.start_position = timing_group.get_position_from_time(hit_object.start_time, false);
+            hit_object.start_position_tail = if hit_object.end_time.is_some() {
+                // if this is a long note, set the end position
+                timing_group.get_position_from_time(hit_object.end_time.unwrap(),false)
+            } else {
+                // if not a long note, set end position to start position
+                hit_object.start_position
+            };
+            hit_object.hit_position = field_positions.hit_position_y;
         }
+
+        Ok(())
     }
 
-    pub fn initialize_timing_lines(&mut self, field_positions: &FieldPositions) {
+    pub fn initialize_timing_lines(&mut self, field_positions: &FieldPositions) -> Result<()> {
         // creates timing lines based on timing points' signatures and BPMs
         self.timing_lines.clear();
 
-        let tg = &self.timing_groups[DEFAULT_TIMING_GROUP_ID];
+        let Some(tg) = self.timing_groups.get(DEFAULT_TIMING_GROUP_ID) else {
+            bail!("Default timing group '{}' not found", DEFAULT_TIMING_GROUP_ID);
+        };
 
         // loop through timing points
         for tp_index in 0..self.timing_points.len() {
@@ -205,7 +218,7 @@ impl Map {
 
             while current_time < end_time {
                 // position for the timing line
-                let start_position = tg.get_position_from_time(current_time);
+                let start_position = tg.get_position_from_time(current_time, false);
 
                 // create and add new timing line
                 self.timing_lines.push(TimingLine {
@@ -219,6 +232,8 @@ impl Map {
                 current_time += ms_increment;
             }
         }
+
+        Ok(())
     }
 
     pub fn initialize_beat_snaps(&mut self) {
@@ -273,7 +288,7 @@ impl Map {
         self.time = time;
         for timing_group in self.timing_groups.values_mut() {
             timing_group.current_ssf_factor = timing_group.get_scroll_speed_factor_from_time(time);
-            timing_group.current_track_position = timing_group.get_position_from_time(time);
+            timing_group.current_track_position = timing_group.get_position_from_time(time, self.mods.no_sv);
         }
     }
 
@@ -295,30 +310,44 @@ impl Map {
         }
     }
 
-    pub fn update_timing_lines(&mut self) {
+    pub fn update_timing_lines(&mut self) -> Result<()> {
         // updates the position of all timing lines
-        let timing_group = self
-            .timing_groups
-            .get_mut(DEFAULT_TIMING_GROUP_ID)
-            .unwrap();
+        let Some(timing_group) = self.timing_groups.get_mut(DEFAULT_TIMING_GROUP_ID) else {
+            bail!("Default timing group '{}' not found", DEFAULT_TIMING_GROUP_ID);
+        };
         for timing_line in &mut self.timing_lines {
             // timing_line.current_track_position = (timing_group.current_track_position - timing_line.start_position);
             timing_line.current_track_position = timing_group.get_object_position(
                 timing_line.hit_position,
-                timing_line.start_position,
-                true,
+                if self.mods.no_sv {
+                    (timing_line.start_time * TRACK_ROUNDING) as Position
+                } else {
+                    timing_line.start_position
+                },
+                self.mods.no_ssf,
             );
         }
+
+        Ok(())
     }
 
-    pub fn update_hit_objects(&mut self) {
+    pub fn update_hit_objects(&mut self) -> Result<()> {
         // update the position of all hit objects
         // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L387
         for hit_object in &mut self.hit_objects {
-            let timing_group = self
-                .timing_groups
-                .get_mut(hit_object.timing_group.as_ref().unwrap())
-                .unwrap();
+            let Some(group_id) = hit_object.timing_group.as_ref() else {
+                warn!("Hit object at time {} has no timing group", hit_object.start_time);
+                continue;
+            };
+
+            let Some(timing_group) = self.timing_groups.get_mut(group_id) else {
+                warn!(
+                    "Timing group '{}' not found for hit object at time {}",
+                    group_id,
+                    hit_object.start_time
+                );
+                continue;
+            };
 
             while hit_object.previous_positions.len() < 10 {
                 // ensure we have at least 10 previous positions
@@ -336,10 +365,27 @@ impl Map {
 
             hit_object.position = timing_group.get_object_position(
                 hit_object.hit_position,
-                hit_object.start_position,
-                true,
+                if self.mods.no_sv {
+                    (hit_object.start_time * TRACK_ROUNDING) as Position
+                } else {
+                    hit_object.start_position
+                },
+                self.mods.no_ssf,
             );
+
+            hit_object.position_tail = timing_group.get_object_position(
+                hit_object.hit_position,
+                if self.mods.no_sv {
+                    (hit_object.end_time.unwrap_or(hit_object.start_time) * TRACK_ROUNDING) as Position
+                } else {
+                    hit_object.start_position_tail
+                },
+                self.mods.no_ssf,
+            )
+
         }
+
+        Ok(())
     }
 
     pub const fn get_key_count(&self, include_scratch: bool) -> i64 {
@@ -422,13 +468,15 @@ pub struct HitObject {
     #[serde(skip)]
     pub snap_index: usize, // index for snap color
     #[serde(skip)]
-    pub hold_end_hit_position: f64, // position for LN ends
-    #[serde(skip)]
     pub hit_position: f64, // where the note is "hit", calculated from hit body height and hit position offset
     #[serde(skip)]
     pub start_position: Position, // track position at start_time (in timing group)
     #[serde(skip)]
+    pub start_position_tail: Position, // track position at start_time for LN end
+    #[serde(skip)]
     pub position: Position, // live map position, calculated with timing group
+    #[serde(skip)]
+    pub position_tail: Position, // live position of the LN end
     #[serde(skip)]
     pub previous_positions: VecDeque<Position>, // previous positions, used for rendering effects
 }
@@ -470,7 +518,7 @@ pub struct TimingGroup {
 }
 
 impl TimingGroup {
-    fn get_scroll_speed_factor_from_time(&self, time: Time) -> f64 {
+    pub fn get_scroll_speed_factor_from_time(&self, time: Time) -> f64 {
         // gets the SSF multiplier at a time, with linear interpolation
         let ssf_index = index_at_time(&self.scroll_speed_factors, time);
 
@@ -497,8 +545,12 @@ impl TimingGroup {
         }
     }
 
-    fn get_position_from_time(&self, time: Time) -> Position {
+    pub fn get_position_from_time(&self, time: Time, ignore_sv: bool) -> Position {
         // calculates the timing group's track position with time and SV
+        if ignore_sv {
+            return (time * TRACK_ROUNDING) as Position;
+        }
+
         let sv_index = index_at_time(&self.scroll_velocities, time);
 
         match sv_index {
@@ -522,7 +574,7 @@ impl TimingGroup {
         }
     }
 
-    fn get_object_position(&self, hit_position: f64, initial_position: Position, use_ssf: bool) -> Position {
+    pub fn get_object_position(&self, hit_position: f64, initial_position: Position, ignore_ssf: bool) -> Position {
         // calculates the position of a hit object with a position offset
         // note: signs were swapped in quaver?
         let mut scroll_speed = if SKIN.downscroll {
@@ -531,7 +583,7 @@ impl TimingGroup {
             self.scroll_speed
         };
 
-        if use_ssf {
+        if !ignore_ssf {
             // apply SSF factor
             scroll_speed *= self.current_ssf_factor;
         }

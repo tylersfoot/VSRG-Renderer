@@ -14,6 +14,7 @@ use vsrg_renderer::{index_at_time, lerp, object_at_time, sort_by_start_time, Has
 
 use anyhow::Result;
 use core::f64;
+use clap::Parser;
 use macroquad::{
     prelude::*,
 };
@@ -21,25 +22,38 @@ use macroquad::{
 use std::{
     fs::{self, File},
     io::{Error, Write as _},
-    path::Path,
+    path::{Path, PathBuf},
     string::ToString,
     time::Instant,
 };
 
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about = "VSRG Renderer")]
+struct CliArgs {
+    /// Directory containing the map (.qua) file
+    map_dir: PathBuf,
+
+    /// Start the game in fullscreen mode
+    #[arg(long)]
+    fullscreen: bool,
+}
+
 fn window_conf() -> Conf {
+    let args = CliArgs::parse();
     Conf {
         window_title: "VSRG Renderer".to_string(),
         window_width: 1000,
         window_height: 1200,
+        fullscreen: args.fullscreen,
         ..Default::default()
     }
 }
 
 #[macroquad::main(window_conf)]
-async fn main() -> anyhow::Result<()> {
+pub async fn main() -> anyhow::Result<()> {
     simple_logger::init().unwrap();
-    let mut is_fullscreen = false;
-    let song_name = "finale";
+    let args = CliArgs::parse();
+    let mut is_fullscreen = args.fullscreen;
 
     // --- audio setup ---
     let mut audio_manager = AudioManager::new().map_err(|e| {
@@ -48,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     // --- map loading ---
+    let song_name = args.map_dir;
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map_folder_path = project_dir.join("songs/").join(song_name);
     let map_file_name_option = fs::read_dir(&map_folder_path)
@@ -59,15 +74,11 @@ async fn main() -> anyhow::Result<()> {
 
     let Some(map_file_name) = map_file_name_option else {
         let err_msg = format!(
-            "Error: No .qua file found in directory {}",
+            "No .qua file found in directory {}",
             map_folder_path.display()
         );
         log::error!("{err_msg}");
-        loop {
-            clear_background(DARKGRAY);
-            draw_text(&err_msg, 20.0, 20.0, 20.0, RED);
-            next_frame().await;
-        }
+        anyhow::bail!(err_msg);
     };
 
     log::info!("Loading map: {map_file_name}");
@@ -91,14 +102,24 @@ async fn main() -> anyhow::Result<()> {
     map.length = audio_manager.get_total_duration_ms().unwrap_or(0f64);
     map.rate = audio_manager.get_rate();
     map.mods.mirror = true;
+    map.mods.no_sv = false;
+    map.mods.no_ssf = false;
 
     // map processing functions / preload
     let field_positions = set_reference_positions();
     map.initialize_default_timing_group();
     map.sort();
     map.initialize_control_points();
-    map.initialize_hit_objects(&field_positions);
-    map.initialize_timing_lines(&field_positions);
+    map.initialize_hit_objects(&field_positions)
+        .map_err(|e| {
+            log::error!("Failed to initialize hit objects: {e}");
+            e
+        })?;
+    map.initialize_timing_lines(&field_positions)
+        .map_err(|e| {
+            log::error!("Failed to initialize timing lines: {e}");
+            e
+        })?;
     map.initialize_beat_snaps();
 
     let total_hit_objects = map.hit_objects.len();
@@ -177,7 +198,10 @@ async fn main() -> anyhow::Result<()> {
         // --------- render stuff --------
 
         clear_background(BLACK); // resets frame to all black
-        render_frame(&mut frame_state, &mut macroquad_draw);
+        render_frame(&mut frame_state, &mut macroquad_draw).map_err(|e| {
+            log::error!("Render error: {e}");
+            e
+        })?;
 
         // -------- draw ui / debug info --------
 

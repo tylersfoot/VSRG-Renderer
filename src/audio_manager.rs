@@ -16,6 +16,7 @@ pub struct AudioManager {
 
     // timing related fields
     playback_start_instant: Option<Instant>, // when current play segment started
+    playback_start_rate: f64,                // rate at time of segment start
     accumulated_play_time_ms: f64,           // total time audio has played across pauses
     is_audio_engine_paused: bool,            // to reflect actual sink state
 
@@ -47,6 +48,7 @@ impl AudioManager {
             audio_source_path: None,
             current_error: None,
             playback_start_instant: None,
+            playback_start_rate: INITIAL_AUDIO_RATE,
             accumulated_play_time_ms: 0.0,
             is_audio_engine_paused: true,
             length: None,
@@ -152,6 +154,7 @@ impl AudioManager {
                     sink_ref.play();
                 }
                 self.playback_start_instant = Some(Instant::now());
+                self.playback_start_rate = self.rate;
                 self.is_audio_engine_paused = false;
                 log::info!("Audiomanager: Audio playing/resumed.");
             }
@@ -162,14 +165,15 @@ impl AudioManager {
         }
     }
 
-    /// Stops the audio playback and clears the sink.
+    /// Pauses playback and records the elapsed time.
     pub fn pause(&mut self) {
         if let Some(s) = self.sink.as_mut() {
             if !s.is_paused() {
                 s.pause();
                 if let Some(start_instant) = self.playback_start_instant.take() {
                     self.accumulated_play_time_ms +=
-                        start_instant.elapsed().as_secs_f64() * 1000f64;
+                        start_instant.elapsed().as_secs_f64() * 1000f64
+                            * self.playback_start_rate;
                 }
                 self.is_audio_engine_paused = true;
                 log::info!(
@@ -184,6 +188,7 @@ impl AudioManager {
     pub fn restart(&mut self) {
         self.accumulated_play_time_ms = 0f64;
         self.playback_start_instant = None;
+        self.playback_start_rate = self.rate;
         self.is_audio_engine_paused = true; // will be set to false by play() if successful
 
         if let Some(s) = self.sink.as_mut() {
@@ -215,7 +220,9 @@ impl AudioManager {
         if !self.is_audio_engine_paused {
             if let Some(start_instant) = self.playback_start_instant {
                 current_time = self.accumulated_play_time_ms
-                    + (start_instant.elapsed().as_secs_f64() * 1000f64 * self.rate);
+                    + (start_instant.elapsed().as_secs_f64()
+                        * 1000f64
+                        * self.playback_start_rate);
             }
         }
         // clamp time to total duration if available
@@ -260,9 +267,11 @@ impl AudioManager {
         }
         if !self.is_audio_engine_paused {
             if let Some(start_instant) = self.playback_start_instant.take() {
-                self.accumulated_play_time_ms += start_instant.elapsed().as_secs_f64() * 1000f64;
+                self.accumulated_play_time_ms +=
+                    start_instant.elapsed().as_secs_f64() * 1000f64 * self.playback_start_rate;
             }
             self.playback_start_instant = Some(Instant::now());
+            self.playback_start_rate = self.rate;
         }
         log::info!("Audiomanager: Rate set to {}", self.rate);
     }

@@ -1,7 +1,8 @@
 use crate::constants::{FieldPositions, SKIN, BEAT_SNAPS};
 use crate::draw::Draw;
 use crate::map::Map;
-use crate::index_at_time;
+// use crate::index_at_time;
+use anyhow::Result;
 use macroquad::{color::*};
 
 pub struct FrameState<'map> {
@@ -13,33 +14,13 @@ pub fn set_reference_positions() -> FieldPositions {
     let mut field_positions = FieldPositions {
         receptor_position_y: 0.0,
         hit_position_y: 0.0,
-        hold_hit_position_y: 0.0,
-        hold_end_hit_position_y: 0.0,
         timing_line_position_y: 0.0,
-        long_note_size_adjustment: 0.0,
     };
 
-    // let lane_size = SKIN.lane_width; // * base_to_virtual_ratio
-
-    // let hit_object_offset = lane_size * SKIN.note_height / SKIN.note_width;
-    let hit_object_offset = 0f64; // temp
-    // let hold_hit_object_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_hit_object_offset = 0f64; // temp
-    // let hold_end_offset = lane_size * SKIN.hold_note_height / SKIN.hold_note_width;
-    let hold_end_offset = 0f64; // temp
-    // let receptors_height = 0.0; // temp
-    // let receptors_width = lane_size; // temp
-    // let receptor_offset = lane_size * receptors_height / receptors_width;
-    let receptor_offset = 0f64; // temp
-
-    field_positions.long_note_size_adjustment = hold_hit_object_offset / 2f64;
-
     if SKIN.downscroll {
-        field_positions.receptor_position_y = -SKIN.receptors_y_position - receptor_offset; // + window_height
-        field_positions.hit_position_y = field_positions.receptor_position_y + 0f64 - hit_object_offset; // 0.0 = hit_pos_offset
-        field_positions.hold_hit_position_y = field_positions.receptor_position_y + 0f64 - hold_hit_object_offset; // 0.0 = hit_pos_offset
-        field_positions.hold_end_hit_position_y = field_positions.receptor_position_y + 0f64 - hold_end_offset; // 0.0 = hit_pos_offset
-        field_positions.timing_line_position_y = field_positions.receptor_position_y + 0f64; // 0.0 = hit_pos_offset
+        field_positions.receptor_position_y = -SKIN.receptors_y_position;
+        field_positions.hit_position_y = field_positions.receptor_position_y;
+        field_positions.timing_line_position_y = field_positions.receptor_position_y;
     } else {
         // i dont care about upscroll right now
     }
@@ -47,14 +28,14 @@ pub fn set_reference_positions() -> FieldPositions {
     field_positions
 }
 
-pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
+pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> {
     // calculates the positions of all objects and renders the current frame given the framestate
 
     // update functions
     state.map.update_track_position(state.map.time);
     state.map.update_scroll_speed();
-    state.map.update_timing_lines();
-    state.map.update_hit_objects();
+    state.map.update_timing_lines()?;
+    state.map.update_hit_objects()?;
 
     // reference/base screen size
     // let base_height = 1440.0;
@@ -126,16 +107,28 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
     }
 
     // notes
-    let first = index_at_time(&state.map.hit_objects, state.map.time)
-        .unwrap_or(0); // first note to render
-    for index in first..state.map.hit_objects.len() {
+    // let first = index_at_time(&state.map.hit_objects, state.map.time)
+    //     .unwrap_or(0); // first note to render
+    for index in 0..state.map.hit_objects.len() {
         let note = &state.map.hit_objects[index];
-        if note.start_time <= state.map.time {
+        let is_long_note = note.end_time.is_some();
+        if (note.start_time <= state.map.time)
+            && (!is_long_note || note.end_time.unwrap() <= state.map.time) {
             // past receptors, skip rendering
             continue;
         }
+        let is_held = note.start_time <= state.map.time;
 
-        let note_y = (note.position as f64) + window_height; // real hitbox
+         // real hitbox
+        let note_y = if is_held {
+            // held notes are rendered at the receptors
+            state.field_positions.receptor_position_y + window_height
+        } else {
+            (note.position as f64) + window_height
+        };
+            
+        let note_tail_y = (note.position_tail as f64) + window_height; // long note end position
+
 
         // calculate x position based on lane (1-indexed in quaver)
         // adjust lane to be 0-indexed for calculation
@@ -150,9 +143,11 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
             + (SKIN.lane_width / 2f64) // center in lane
             - (SKIN.note_width / 2f64);
 
-        let mut note_top_offset = SKIN.note_height / 2f64;
-        let mut note_bottom_offset = SKIN.note_height / 2f64;
-        let middle_position = note_y - SKIN.note_height / 2f64;
+        let half_note_height = SKIN.note_height / 2f64;
+
+        let mut note_top_offset = half_note_height;
+        let mut note_bottom_offset = half_note_height;
+        let middle_position = note_y - half_note_height;
         let frame_behind = 0;
         let stretch_limit = SKIN.note_height * 8f64; // max stretch limit
 
@@ -181,11 +176,21 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
 
         match SKIN.note_shape {
             "bars" => {
+                if is_long_note {
+                    let height = note_tail_y - note_y;
+                    draw.draw_rectangle(
+                        note_x,
+                        note_y, // bottom of ln
+                        SKIN.note_width,
+                        height, // top/height of ln
+                        DARKGRAY,
+                    );
+                }
                 draw.draw_rectangle(
                     note_x,
-                    middle_position - note_top_offset,
+                    middle_position - note_top_offset, // bottom of note
                     SKIN.note_width,
-                    note_top_offset + note_bottom_offset,
+                    note_top_offset + note_bottom_offset, // top/height of note
                     color,
                 );
                 // draw.draw_rectangle( // middle of note
@@ -204,6 +209,12 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
                 // );
             }
             "circles" => {
+                // if let Some(end_y) = long_end_y {
+                //     let top = note_y.min(end_y);
+                //     let height = (end_y - note_y).abs();
+                //     let center_x = note_x + (SKIN.note_width / 2.0);
+                //     draw.draw_rectangle(center_x - 2.0, top, 4.0, height, color);
+                // }
                 draw.draw_circle(
                     note_x + (SKIN.note_width / 2.0),
                     note_y,
@@ -214,4 +225,6 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) {
             _ => {}
         }
     }
+
+    Ok(())
 }

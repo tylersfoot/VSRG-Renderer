@@ -13,3 +13,4 @@ target/
 skins/
 songs/
 output.json
+Cargo.lock
