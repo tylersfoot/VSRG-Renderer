@@ -59,9 +59,7 @@ impl AudioManager {
     }
 
     pub fn seek_ms(&mut self, ms: f64) {
-        let target = self
-            .length
-            .map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
+        let target = self.length.map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
         self.current_time_ms = target;
     }
 

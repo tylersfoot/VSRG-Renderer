@@ -172,8 +172,7 @@ impl AudioManager {
                 s.pause();
                 if let Some(start_instant) = self.playback_start_instant.take() {
                     self.accumulated_play_time_ms +=
-                        start_instant.elapsed().as_secs_f64() * 1000f64
-                            * self.playback_start_rate;
+                        start_instant.elapsed().as_secs_f64() * 1000f64 * self.playback_start_rate;
                 }
                 self.is_audio_engine_paused = true;
                 log::info!(
@@ -219,9 +218,7 @@ impl AudioManager {
     /// If audio was playing before the seek, playback will resume from the new
     /// position. Otherwise, the sink remains paused.
     pub fn seek_ms(&mut self, ms: f64) {
-        let target_ms = self
-            .length
-            .map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
+        let target_ms = self.length.map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
 
         let was_playing = self.is_playing();
 
@@ -246,8 +243,9 @@ impl AudioManager {
                     match File::open(path) {
                         Ok(file) => match Decoder::new(BufReader::new(file)) {
                             Ok(decoder) => {
-                                let source = decoder
-                                    .skip_duration(std::time::Duration::from_millis(target_ms as u64));
+                                let source = decoder.skip_duration(
+                                    std::time::Duration::from_millis(target_ms as u64),
+                                );
                                 new_sink.append(source);
                                 if was_playing {
                                     new_sink.play();
@@ -298,9 +296,7 @@ impl AudioManager {
         if !self.is_audio_engine_paused {
             if let Some(start_instant) = self.playback_start_instant {
                 current_time = self.accumulated_play_time_ms
-                    + (start_instant.elapsed().as_secs_f64()
-                        * 1000f64
-                        * self.playback_start_rate);
+                    + (start_instant.elapsed().as_secs_f64() * 1000f64 * self.playback_start_rate);
             }
         }
         // clamp time to total duration if available

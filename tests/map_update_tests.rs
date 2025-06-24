@@ -1,9 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use vsrg_renderer::constants::{FieldPositions, DEFAULT_TIMING_GROUP_ID, SKIN};
-use vsrg_renderer::map::{
-    ControlPoint, HitObject, Map, Mods, TimingPoint, TimeSignature,
-};
+use vsrg_renderer::map::{ControlPoint, HitObject, Map, Mods, TimeSignature, TimingPoint};
 
 fn create_basic_map() -> (Map, FieldPositions) {
     let mut map = Map {
@@ -161,8 +159,7 @@ fn create_map_with_params(
 
     map.initialize_default_timing_group();
     map.initialize_control_points();
-    map
-        .initialize_hit_objects(&field_positions)
+    map.initialize_hit_objects(&field_positions)
         .unwrap_or_else(|e| {
             panic!("Failed to initialize hit objects: {e}");
         });
@@ -190,8 +187,8 @@ fn test_update_scroll_speed() {
     let tg = &map.timing_groups[DEFAULT_TIMING_GROUP_ID];
 
     let speed = SKIN.scroll_speed;
-    let rate_scaling =
-        1f64 + (map.rate - 1f64) * (SKIN.normalize_scroll_velocity_by_rate_percentage as f64 / 100f64);
+    let rate_scaling = 1f64
+        + (map.rate - 1f64) * (SKIN.normalize_scroll_velocity_by_rate_percentage as f64 / 100f64);
     let adjusted = (speed * rate_scaling).clamp(50.0, 1000.0);
     let scaling_factor = 1920f64 / 1366f64;
     let expected = (adjusted / 10f64) / (20f64 * map.rate) * scaling_factor;

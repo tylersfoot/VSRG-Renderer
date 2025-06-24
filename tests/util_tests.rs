@@ -50,11 +50,10 @@ fn test_object_at_time() {
     assert_eq!(object_at_time(&list, 35.0).unwrap().start, 30.0);
 }
 
-
 #[cfg(test)]
 mod map_tests {
-    use vsrg_renderer::map::{GameMode, Map, Mods, TimingGroup};
     use std::collections::HashMap;
+    use vsrg_renderer::map::{GameMode, Map, Mods, TimingGroup};
 
     fn minimal_map(mode: GameMode, has_scratch_key: bool) -> Map {
         Map {
@@ -116,7 +115,10 @@ mod map_tests {
         };
 
         // with no SV points, position should be time * sv * rounding
-        assert_eq!(tg.get_position_from_time(1.5, false), (1.5 * 1.0 * 100.0) as i64);
+        assert_eq!(
+            tg.get_position_from_time(1.5, false),
+            (1.5 * 1.0 * 100.0) as i64
+        );
 
         // object position with downscroll true, scroll_speed 2, no SSF
         let pos = tg.get_object_position(50.0, 100, true);

@@ -10,9 +10,9 @@ pub const TRACK_ROUNDING: f64 = 100.0;
 #[derive(Debug, Clone)]
 pub struct FieldPositions {
     // positions from top of screen
-    pub receptor_position_y: f64,       // receptors position
-    pub hit_position_y: f64,            // hit object target position
-    pub timing_line_position_y: f64,    // timing line position
+    pub receptor_position_y: f64,    // receptors position
+    pub hit_position_y: f64,         // hit object target position
+    pub timing_line_position_y: f64, // timing line position
 }
 
 pub struct BeatSnap {
@@ -36,29 +36,25 @@ pub const BEAT_SNAPS: &[BeatSnap] = &[
 #[derive(Debug, Clone)]
 pub struct Skin {
     // skin settings
-    pub note_shape: &'static str,        // shape of the notes ("circles", "bars")
-    pub lane_width: f64,                 // width of each lane/column
-    pub note_width: f64,                 // width of each note
-    pub note_height: f64,                // height of each note
-    pub receptors_y_position: f64,       // y position of the receptors/hit line
-    pub scroll_speed: f64,               // scroll speed of the notes
-    // pub rate_affects_scroll_speed: bool, // whether the rate multiplies the scroll speed
-    // pub draw_lanes: bool,                // whether to draw the lanes
-    pub wide_timing_lines: bool,         // whether to draw timing lines to the sides of the screen
-    pub downscroll: bool,                // downscroll (true) or upscroll (false)
+    pub note_shape: &'static str,  // shape of the notes ("circles", "bars")
+    pub lane_width: f64,           // width of each lane/column
+    pub note_width: f64,           // width of each note
+    pub note_height: f64,          // height of each note
+    pub receptors_y_position: f64, // y position of the receptors/hit line
+    pub scroll_speed: f64,         // scroll speed of the notes
+    pub wide_timing_lines: bool,   // whether to draw timing lines to the sides of the screen
+    pub downscroll: bool,          // downscroll (true) or upscroll (false)
     pub normalize_scroll_velocity_by_rate_percentage: usize, // percentage of scaling applied when changing rates
 }
 
 
 pub const SKIN: Skin = Skin {
     note_shape: "bars",
-    lane_width: 145.0, // 136
-    note_width: 145.0,
-    note_height: 36.0, // 36
+    lane_width: 145.0,           // 136
+    note_width: 145.0,           // 136
+    note_height: 36.0,           // 36
     receptors_y_position: 226.0, // 226
-    scroll_speed: 320.0, // 200, // 20 in quaver
-    // rate_affects_scroll_speed: true,
-    // draw_lanes: true,
+    scroll_speed: 320.0,         // 200 = 20 in quaver
     wide_timing_lines: true,
     downscroll: true,
     normalize_scroll_velocity_by_rate_percentage: 100,

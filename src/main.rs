@@ -13,15 +13,13 @@ use audio_manager::AudioManager;
 use audio_manager_stub::AudioManager;
 use draw::MacroquadDraw;
 use map::Map;
-use render::{render_frame, FrameState, set_reference_positions};
+use render::{render_frame, set_reference_positions, FrameState};
 use vsrg_renderer::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time};
 
 use anyhow::Result;
-use core::f64;
 use clap::Parser;
-use macroquad::{
-    prelude::*,
-};
+use core::f64;
+use macroquad::prelude::*;
 
 use std::{
     fs::{self, File},
@@ -40,7 +38,7 @@ struct CliArgs {
     /// Start in fullscreen
     #[arg(long)]
     fullscreen: bool,
-    
+
     /// Playback rate
     #[arg(long, default_value_t = 1.0)]
     rate: f64,
@@ -152,8 +150,16 @@ pub async fn main() -> anyhow::Result<()> {
 
     let total_hit_objects = map.hit_objects.len();
     let total_timing_points = map.timing_points.len();
-    let total_svs = map.timing_groups.values().map(|g| g.scroll_velocities.len()).sum::<usize>();
-    let total_ssfs = map.timing_groups.values().map(|g| g.scroll_speed_factors.len()).sum::<usize>();
+    let total_svs = map
+        .timing_groups
+        .values()
+        .map(|g| g.scroll_velocities.len())
+        .sum::<usize>();
+    let total_ssfs = map
+        .timing_groups
+        .values()
+        .map(|g| g.scroll_speed_factors.len())
+        .sum::<usize>();
     let total_timing_groups = map.timing_groups.len();
     let total_timing_lines = map.timing_lines.len();
     log::info!(
@@ -256,12 +262,7 @@ pub async fn main() -> anyhow::Result<()> {
         let mut y_offset = 20.0;
         let line_height = 20.0;
 
-        if let (
-            Some(title),
-            Some(artist),
-            Some(difficulty),
-            Some(creator),
-        ) = (
+        if let (Some(title), Some(artist), Some(difficulty), Some(creator)) = (
             map.title.as_ref(),
             map.artist.as_ref(),
             map.difficulty_name.as_ref(),
@@ -315,9 +316,7 @@ pub async fn main() -> anyhow::Result<()> {
             }
         };
         draw_text(
-            &format!(
-                "Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"
-            ),
+            &format!("Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"),
             10.0,
             y_offset,
             20.0,

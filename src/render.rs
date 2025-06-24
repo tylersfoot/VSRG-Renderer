@@ -1,9 +1,9 @@
-use crate::constants::{FieldPositions, SKIN, BEAT_SNAPS};
+use crate::constants::{FieldPositions, BEAT_SNAPS, SKIN};
 use crate::draw::Draw;
 use crate::map::Map;
 // use crate::index_at_time;
 use anyhow::Result;
-use macroquad::{color::*};
+use macroquad::color::*;
 
 pub struct FrameState<'map> {
     pub map: &'map mut Map,
@@ -49,7 +49,7 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> 
     let num_lanes = state.map.get_key_count(false);
     let playfield_width = num_lanes as f64 * SKIN.lane_width;
     let playfield_x = (window_width - playfield_width) / 2f64;
-    
+
     // receptors (above notes)
     match SKIN.note_shape {
         "bars" => {
@@ -119,14 +119,14 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> 
         }
         let is_held = note.start_time <= state.map.time;
 
-         // real hitbox
+        // real hitbox
         let note_y = if is_held {
             // held notes are rendered at the receptors
             state.field_positions.receptor_position_y + window_height
         } else {
             (note.position as f64) + window_height
         };
-            
+
         let note_tail_y = (note.position_tail as f64) + window_height; // long note end position
 
 

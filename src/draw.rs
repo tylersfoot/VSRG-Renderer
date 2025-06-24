@@ -1,4 +1,4 @@
-use macroquad::{prelude::*, color::Color};
+use macroquad::{color::Color, prelude::*};
 
 pub trait Draw {
     fn draw_rectangle(&mut self, x: f64, y: f64, w: f64, h: f64, color: Color);
