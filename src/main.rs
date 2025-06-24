@@ -33,9 +33,29 @@ struct CliArgs {
     /// Directory containing the map (.qua) file
     map_dir: PathBuf,
 
-    /// Start the game in fullscreen mode
+    /// Start in fullscreen
     #[arg(long)]
     fullscreen: bool,
+    
+    /// Playback rate
+    #[arg(long, default_value_t = 1.0)]
+    rate: f64,
+
+    /// Initial audio volume
+    #[arg(long, default_value_t = 0.03)]
+    volume: f64,
+
+    /// Mirror notes horizontally
+    #[arg(long)]
+    mirror: bool,
+
+    /// Ignore scroll velocities
+    #[arg(long)]
+    no_sv: bool,
+
+    /// Ignore scroll speed factors
+    #[arg(long)]
+    no_ssf: bool,
 }
 
 fn window_conf() -> Conf {
@@ -60,6 +80,9 @@ pub async fn main() -> anyhow::Result<()> {
         log::error!("Critical audio error on init: {e}");
         Error::other(e)
     })?;
+
+    audio_manager.set_rate(args.rate);
+    audio_manager.set_volume(args.volume);
 
     // --- map loading ---
     let song_name = args.map_dir;
@@ -101,26 +124,27 @@ pub async fn main() -> anyhow::Result<()> {
 
     map.length = audio_manager.get_total_duration_ms().unwrap_or(0f64);
     map.rate = audio_manager.get_rate();
-    map.mods.mirror = true;
-    map.mods.no_sv = false;
-    map.mods.no_ssf = false;
+    map.mods.mirror = args.mirror;
+    map.mods.no_sv = args.no_sv;
+    map.mods.no_ssf = args.no_ssf;
 
     // map processing functions / preload
     let field_positions = set_reference_positions();
     map.initialize_default_timing_group();
     map.sort();
     map.initialize_control_points();
-    map.initialize_hit_objects(&field_positions)
-        .map_err(|e| {
-            log::error!("Failed to initialize hit objects: {e}");
-            e
-        })?;
-    map.initialize_timing_lines(&field_positions)
-        .map_err(|e| {
-            log::error!("Failed to initialize timing lines: {e}");
-            e
-        })?;
-    map.initialize_beat_snaps();
+    map.initialize_hit_objects(&field_positions).map_err(|e| {
+        log::error!("Failed to initialize hit objects: {e}");
+        e
+    })?;
+    map.initialize_timing_lines(&field_positions).map_err(|e| {
+        log::error!("Failed to initialize timing lines: {e}");
+        e
+    })?;
+    map.initialize_beat_snaps().map_err(|e| {
+        log::error!("Failed to initialize beat snaps: {e}");
+        e
+    })?;
 
     let total_hit_objects = map.hit_objects.len();
     let total_timing_points = map.timing_points.len();
@@ -176,15 +200,35 @@ pub async fn main() -> anyhow::Result<()> {
             let new_vol = (audio_manager.get_volume() - 0.05).max(0.0);
             audio_manager.set_volume(new_vol);
         }
-        if is_key_pressed(KeyCode::Right) {
+        if is_key_pressed(KeyCode::Equal) {
             let new_rate = (audio_manager.get_rate() + 0.1).min(2.0);
             audio_manager.set_rate(new_rate);
             map.rate = new_rate;
         }
-        if is_key_pressed(KeyCode::Left) {
+        if is_key_pressed(KeyCode::Minus) {
             let new_rate = (audio_manager.get_rate() - 0.1).max(0.5);
             audio_manager.set_rate(new_rate);
             map.rate = new_rate;
+        }
+        if is_key_pressed(KeyCode::Left) {
+            let offset = 5000.0;
+            let mut new_time = audio_manager.get_current_song_time_ms() - offset;
+            if let Some(total) = audio_manager.get_total_duration_ms() {
+                new_time = new_time.clamp(0.0, total);
+            } else {
+                new_time = new_time.max(0.0);
+            }
+            audio_manager.seek_ms(new_time);
+        }
+        if is_key_pressed(KeyCode::Right) {
+            let offset = 5000.0;
+            let mut new_time = audio_manager.get_current_song_time_ms() + offset;
+            if let Some(total) = audio_manager.get_total_duration_ms() {
+                new_time = new_time.clamp(0.0, total);
+            } else {
+                new_time = new_time.max(0.0);
+            }
+            audio_manager.seek_ms(new_time);
         }
 
         let time = audio_manager.get_current_song_time_ms();

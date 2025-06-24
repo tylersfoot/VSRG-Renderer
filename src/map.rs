@@ -236,7 +236,11 @@ impl Map {
         Ok(())
     }
 
-    pub fn initialize_beat_snaps(&mut self) {
+    pub fn initialize_beat_snaps(&mut self) -> Result<()> {
+        if self.timing_points.is_empty() {
+            bail!("Cannot initialize beat snaps without timing points");
+        }
+
         for hit_object in &mut self.hit_objects {
             // get active timing point at hit object's start time
             let timing_point = object_at_time(&self.timing_points, hit_object.start_time)
@@ -263,6 +267,8 @@ impl Map {
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn sort(&mut self) {
@@ -381,7 +387,7 @@ impl Map {
                     hit_object.start_position_tail
                 },
                 self.mods.no_ssf,
-            )
+            );
 
         }
 

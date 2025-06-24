@@ -214,6 +214,84 @@ impl AudioManager {
         // after restart, play() will handle loading and starting
     }
 
+    /// Seeks to the specified position in milliseconds.
+    ///
+    /// If audio was playing before the seek, playback will resume from the new
+    /// position. Otherwise, the sink remains paused.
+    pub fn seek_ms(&mut self, ms: f64) {
+        let target_ms = self
+            .length
+            .map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
+
+        let was_playing = self.is_playing();
+
+        self.accumulated_play_time_ms = target_ms;
+        self.playback_start_instant = if was_playing {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        self.playback_start_rate = self.rate;
+
+        if let Some(old) = self.sink.take() {
+            old.stop();
+        }
+
+        match Sink::try_new(&self.stream_handle) {
+            Ok(new_sink) => {
+                new_sink.set_volume(self.volume as f32);
+                new_sink.set_speed(self.rate as f32);
+
+                if let Some(path) = &self.audio_source_path {
+                    match File::open(path) {
+                        Ok(file) => match Decoder::new(BufReader::new(file)) {
+                            Ok(decoder) => {
+                                let source = decoder
+                                    .skip_duration(std::time::Duration::from_millis(target_ms as u64));
+                                new_sink.append(source);
+                                if was_playing {
+                                    new_sink.play();
+                                    self.is_audio_engine_paused = false;
+                                } else {
+                                    new_sink.pause();
+                                    self.is_audio_engine_paused = true;
+                                }
+                                self.sink = Some(new_sink);
+                                self.current_error = None;
+                            }
+                            Err(e) => {
+                                let err_msg = format!("Audiomanager: Failed to decode audio: {e}");
+                                log::error!("{err_msg}");
+                                self.current_error = Some(err_msg);
+                                self.sink = Some(new_sink);
+                            }
+                        },
+                        Err(e) => {
+                            let err_msg = format!("Audiomanager: Failed to open audio file: {e}");
+                            log::error!("{err_msg}");
+                            self.current_error = Some(err_msg);
+                            self.sink = Some(new_sink);
+                        }
+                    }
+                } else {
+                    let err_msg = "Audiomanager: No audio source path to seek.".to_string();
+                    log::error!("{err_msg}");
+                    self.current_error = Some(err_msg);
+                    new_sink.pause();
+                    self.sink = Some(new_sink);
+                    self.is_audio_engine_paused = true;
+                }
+            }
+            Err(e) => {
+                let err_msg = format!("Audiomanager: Failed to create sink on seek: {e}");
+                log::error!("{err_msg}");
+                self.current_error = Some(err_msg);
+                self.is_audio_engine_paused = true;
+            }
+        }
+    }
+
+
     /// Returns the current playback time in milliseconds.
     pub fn get_current_song_time_ms(&self) -> f64 {
         let mut current_time = self.accumulated_play_time_ms;
