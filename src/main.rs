@@ -339,6 +339,7 @@ pub async fn main() -> anyhow::Result<()> {
 
         let total_duration_str = match audio_manager.get_total_duration_ms() {
             Some(d) => format!("{:.2}s", d / 1000f64),
+            
             None => "N/A".to_string(),
         };
         draw_text(
