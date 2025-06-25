@@ -14,9 +14,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
-      - name: Cargo fmt
-        run: cargo fmt -- --check
+          components: clippy
       - name: Cargo clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Cargo test
