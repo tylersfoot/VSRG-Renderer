@@ -1,4 +1,4 @@
-use crate::constants::{FieldPositions, BEAT_SNAPS, SKIN};
+use crate::utils::{FieldPositions, BEAT_SNAPS, SKIN, JudgementType};
 use crate::draw::Draw;
 use crate::map::Map;
 // use crate::index_at_time;
@@ -111,25 +111,12 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> 
     //     .unwrap_or(0); // first note to render
     for index in 0..state.map.hit_objects.len() {
         let note = &state.map.hit_objects[index];
-        let is_long_note = note.end_time.is_some();
-        if (note.start_time <= state.map.time)
-            && (!is_long_note || note.end_time.unwrap() <= state.map.time) {
-            // past receptors, skip rendering
+        // skip note if hit
+        if note.hit {
             continue;
         }
-        let is_held = note.start_time <= state.map.time;
-
-        // real hitbox
-        let note_y = if is_held {
-            // held notes are rendered at the receptors
-            state.field_positions.receptor_position_y + window_height
-        } else {
-            (note.position as f64) + window_height
-        };
-
-        let note_tail_y = (note.position_tail as f64) + window_height; // long note end position
-
-
+        let is_long_note = note.end_time.is_some();
+        
         // calculate x position based on lane (1-indexed in quaver)
         // adjust lane to be 0-indexed for calculation
         let lane_index = if state.map.mods.mirror {
@@ -137,6 +124,33 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> 
         } else {
             note.lane - 1
         };
+
+        if state.map.mods.autoplay
+            && (note.start_time <= state.map.time)
+            && (!is_long_note || note.end_time.unwrap() <= state.map.time) {
+            // past receptors in autoplay mode = hit note perfectly
+            state.map.handle_gameplay_key_press(note.start_time, lane_index);
+            continue;
+        }
+        if state.map.time - note.start_time >= state.map.judgement_windows[&JudgementType::Miss] {
+            *state.map.judgement_counts.get_mut(&JudgementType::Miss).unwrap() += 1;
+            state.map.hit_objects[index].hit = true;
+            state.map.last_judgement = Some((JudgementType::Miss, state.map.time, 0.0));
+            state.map.combo = 0;
+            continue;
+        }
+
+        let is_held = note.start_time <= state.map.time;
+
+        // real hitbox
+        let note_y = if is_long_note && is_held {
+            // held notes are rendered at the receptors
+            state.field_positions.receptor_position_y + window_height
+        } else {
+            (note.position as f64) + window_height
+        };
+
+        let note_tail_y = (note.position_tail as f64) + window_height; // long note end position
 
         let note_x = playfield_x
             + (lane_index as f64 * SKIN.lane_width)

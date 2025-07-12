@@ -1,25 +1,24 @@
-#[cfg(feature = "audio")]
+#![allow(clippy::eq_op)]
+#![allow(unused_imports)]
+
 mod audio_manager;
-#[cfg(not(feature = "audio"))]
-mod audio_manager_stub;
-mod constants;
 mod draw;
 mod map;
 mod render;
+mod utils;
+mod logger;
 
-#[cfg(feature = "audio")]
 use audio_manager::AudioManager;
-#[cfg(not(feature = "audio"))]
-use audio_manager_stub::AudioManager;
 use draw::MacroquadDraw;
 use map::Map;
 use render::{render_frame, set_reference_positions, FrameState};
-use vsrg_renderer::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time};
+use utils::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time, JudgementType, SKIN};
 
 use anyhow::Result;
 use clap::Parser;
 use core::f64;
 use macroquad::prelude::*;
+// use macroquad::miniquad::{BlendFactor, PipelineParams};
 
 use std::{
     fs::{self, File},
@@ -32,32 +31,21 @@ use std::{
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "VSRG Renderer")]
 struct CliArgs {
-    /// Directory containing the map (.qua) file
-    map_dir: PathBuf,
-
-    /// Start in fullscreen
+    map_dir: PathBuf, // directory containing the map (.qua) file
     #[arg(long)]
-    fullscreen: bool,
-
-    /// Playback rate
+    fullscreen: bool, // start in fullscreen
     #[arg(long, default_value_t = 1.0)]
-    rate: f64,
-
-    /// Initial audio volume
+    rate: f64,        // playback rate
     #[arg(long, default_value_t = 0.03)]
-    volume: f64,
-
-    /// Mirror notes horizontally
+    volume: f64,      // initial audio volume
     #[arg(long)]
-    mirror: bool,
-
-    /// Ignore scroll velocities
+    mirror: bool,     // mirror notes horizontally
     #[arg(long)]
-    no_sv: bool,
-
-    /// Ignore scroll speed factors
+    no_sv: bool,      // ignore scroll velocities
     #[arg(long)]
-    no_ssf: bool,
+    no_ssf: bool,     // ignore scroll speed factors
+    #[arg(long)]
+    autoplay: bool,   // autoplay mode
 }
 
 fn window_conf() -> Conf {
@@ -73,13 +61,14 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 pub async fn main() -> anyhow::Result<()> {
-    simple_logger::init().unwrap();
     let args = CliArgs::parse();
     let mut is_fullscreen = args.fullscreen;
 
     // --- audio setup ---
     let mut audio_manager = AudioManager::new().map_err(|e| {
-        log::error!("Critical audio error on init: {e}");
+        logger::error(&format!(
+            "Critical audio error on init: {e}"
+        ));
         Error::other(e)
     })?;
 
@@ -102,11 +91,12 @@ pub async fn main() -> anyhow::Result<()> {
             "No .qua file found in directory {}",
             map_folder_path.display()
         );
-        log::error!("{err_msg}");
+        logger::error(&err_msg);
         anyhow::bail!(err_msg);
     };
-
-    log::info!("Loading map: {map_file_name}");
+    logger::info(&format!(
+        "Loading map: {map_file_name}"
+    ));
     let qua_file_content = fs::read_to_string(&map_file_name)
         .map_err(|e| anyhow::anyhow!("Failed to read map file '{}': {}", map_file_name, e))?;
 
@@ -129,6 +119,7 @@ pub async fn main() -> anyhow::Result<()> {
     map.mods.mirror = args.mirror;
     map.mods.no_sv = args.no_sv;
     map.mods.no_ssf = args.no_ssf;
+    map.mods.autoplay = args.autoplay;
 
     // map processing functions / preload
     let field_positions = set_reference_positions();
@@ -136,15 +127,15 @@ pub async fn main() -> anyhow::Result<()> {
     map.sort();
     map.initialize_control_points();
     map.initialize_hit_objects(&field_positions).map_err(|e| {
-        log::error!("Failed to initialize hit objects: {e}");
+        logger::error(&format!("Failed to initialize hit objects: {e}"));
         e
     })?;
     map.initialize_timing_lines(&field_positions).map_err(|e| {
-        log::error!("Failed to initialize timing lines: {e}");
+        logger::error(&format!("Failed to initialize timing lines: {e}"));
         e
     })?;
     map.initialize_beat_snaps().map_err(|e| {
-        log::error!("Failed to initialize beat snaps: {e}");
+        logger::error(&format!("Failed to initialize beat snaps: {e}"));
         e
     })?;
 
@@ -162,24 +153,165 @@ pub async fn main() -> anyhow::Result<()> {
         .sum::<usize>();
     let total_timing_groups = map.timing_groups.len();
     let total_timing_lines = map.timing_lines.len();
-    log::info!(
-        "Map loaded successfully: {total_hit_objects} Hit Objects, {total_timing_points} Timing Points, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Timing Groups, {total_timing_lines} Timing Lines",
-    );
+    logger::info(&format!(
+        "Map loaded successfully: {total_hit_objects} Hit Objects, {total_timing_points} Timing Points, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Timing Groups, {total_timing_lines} Timing Lines"
+    ));
 
     // this is the visual play state, audio is handled by audio_manager
     let mut is_playing_visuals = false;
 
-    let mut json_output_file = File::create("output.json")?;
-    let json_string = serde_json::to_string_pretty(&map)?;
-    write!(json_output_file, "{json_string}")?;
-    log::info!("Parsed map data written to output.json");
+    // let mut json_output_file = File::create("output.json")?;
+    // let json_string = serde_json::to_string_pretty(&map)?;
+    // write!(json_output_file, "{json_string}")?;
+    // logger::info("Parsed map data written to output.json");
 
     let start_instant = Instant::now();
     let mut frame_count: u64 = 0;
 
+    // let vert_src = r#"#version 100
+    // attribute vec3 position;
+    // attribute vec2 texcoord;
+
+    // varying lowp vec2 v_uv;
+
+    // void main() {
+    //     gl_Position = vec4(position,1);
+    //     v_uv = texcoord;
+    // }
+    // "#;
+
+    // // build a full-screen pass that *computes* density from an array of circles
+    // let density_frag = r#"#version 100
+    // precision mediump float;
+
+    // varying lowp vec2 v_uv;
+
+    // uniform vec2 centers[32];
+    // uniform float radii[32];
+    // uniform int ball_count;
+
+    // void main() {
+    //     float d = 0.0;
+
+    //     for (int i=0; i<32; i++) {
+    //         if (i >= ball_count) {
+    //             break;
+    //         }
+
+    //         // quadratic falloff: 1 at center → 0 at radius
+    //         float r = radii[i];
+    //         float dist = length(v_uv - centers[i]) / r;
+    //         d += max(0.0, 1.0 - dist*dist);
+    //     }
+
+    //     gl_FragColor = vec4(0.0, 0.0, 0.0, d);
+    // }
+    // "#;
+
+    // let outline_frag = r#"#version 100
+    // precision mediump float;
+
+    // varying lowp vec2 v_uv;
+
+    // uniform sampler2D densityMap;
+    // uniform sampler2D fillMap;
+    // uniform vec2 density_size;
+    // uniform vec2 screen_size;
+    // uniform float density_threshold;
+    // uniform float outline_radius;
+    // uniform vec4 outline_color;
+
+    // void main() {
+    //     // uv for density sampling
+    //     vec2 d_uv = v_uv * (screen_size / density_size);
+    //     float den = texture2D(densityMap, d_uv).a;
+
+    //     // neighbor-sampling outline
+    //     float neigh = 0.0;
+    //     vec2 px = 1.0 / density_size;
+    //     int r = int(outline_radius);
+    //     for (int x=-r; x<=r; x++) {
+    //         for (int y=-r; y<=r; y++) {
+    //             if (float(x*x + y*y) <= outline_radius*outline_radius) {
+    //                 float nd = texture2D(densityMap, d_uv + px * vec2(float(x),float(y))).a;
+    //                 neigh += step(density_threshold, nd);
+    //             }
+    //         }
+    //     }
+    //     float is_outline = clamp(neigh, 0.0, 1.0) * (1.0 - step(density_threshold, den));
+    //     if (den < density_threshold && is_outline <= 0.0) {
+    //         discard;
+    //     }
+        
+    //     // pick fill vs outline
+    //     vec4 fillc = texture2D(fillMap, v_uv);
+    //     gl_FragColor = mix(fillc, outline_color, is_outline);
+    // }
+    // "#;
+
+    // let density_material = load_material(
+    //     ShaderSource::Glsl {
+    //         vertex: vert_src,
+    //         fragment: density_frag,
+    //     },
+    //     MaterialParams {
+    //         uniforms: vec![
+    //             UniformDesc::new("centers", UniformType::Float2Array(32)),
+    //             UniformDesc::new("radii", UniformType::Float1Array(32)),
+    //             UniformDesc::new("ball_count", UniformType::Int1),
+    //         ],
+    //         ..Default::default()
+    //     },
+    // )
+    // .unwrap();
+
+    // let outline_material = load_material(
+    //     ShaderSource::Glsl {
+    //         vertex: vert_src,
+    //         fragment: outline_frag,
+    //     },
+    //     MaterialParams {
+    //         uniforms: vec![
+    //             UniformDesc::new("densityMap", UniformType::Sampler2D),
+    //             UniformDesc::new("fillMap", UniformType::Sampler2D),
+    //             UniformDesc::new("density_size", UniformType::Float2),
+    //             UniformDesc::new("screen_size", UniformType::Float2),
+    //             UniformDesc::new("density_threshold", UniformType::Float1),
+    //             UniformDesc::new("outline_radius", UniformType::Float1),
+    //             UniformDesc::new("outline_color", UniformType::Float4),
+    //         ],
+    //         ..Default::default()
+    //     },
+    // )
+    // .unwrap();
+
+
+    // let combined_rt = render_target(
+    //     screen_width() as u32,
+    //     screen_height() as u32,
+    // );
+    // combined_rt.texture.set_filter(FilterMode::Nearest);
+
+    // let scene_params = PipelineParams {
+    //     color_blend: BlendFactor::Alpha,    // default
+    //     alpha_blend: BlendFactor::Alpha,
+    //     color_mask: ColorMask { r:true, g:true, b:true, a:false }, // block alpha writes
+    //     ..Default::default()
+    // };
+
+    // let density_params = PipelineParams {
+    //     color_blend: BlendFactor::One,      // additive
+    //     alpha_blend: BlendFactor::One,
+    //     color_mask: ColorMask { r:false, g:false, b:false, a:true },// only alpha
+    //     ..Default::default()
+    // };
+
     // main render loop
     loop {
         frame_count += 1;
+
+        let time = audio_manager.get_current_song_time_ms() + SKIN.offset;
+        map.time = time;
 
         // --- inputs ---
         if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Backspace) {
@@ -241,8 +373,21 @@ pub async fn main() -> anyhow::Result<()> {
             audio_manager.seek_ms(new_time);
         }
 
-        let time = audio_manager.get_current_song_time_ms();
-        map.time = time;
+        // gameplay keybinds
+        if is_key_pressed(KeyCode::A) {
+            map.handle_gameplay_key_press(map.time, 0);
+        }
+        if is_key_pressed(KeyCode::S) {
+            map.handle_gameplay_key_press(map.time, 1);
+        }
+        if is_key_pressed(KeyCode::Semicolon) {
+            map.handle_gameplay_key_press(map.time, 2);
+        }
+        if is_key_pressed(KeyCode::Apostrophe) {
+            map.handle_gameplay_key_press(map.time, 3);
+        }
+
+
         let mut macroquad_draw = MacroquadDraw;
         let mut frame_state = FrameState {
             map: &mut map,
@@ -253,7 +398,7 @@ pub async fn main() -> anyhow::Result<()> {
 
         clear_background(BLACK); // resets frame to all black
         render_frame(&mut frame_state, &mut macroquad_draw).map_err(|e| {
-            log::error!("Render error: {e}");
+            logger::error(&format!("Render error: {e}"));
             e
         })?;
 
@@ -297,23 +442,14 @@ pub async fn main() -> anyhow::Result<()> {
         };
         let audio_actual_state_text = if audio_manager.is_playing() {
             "Playing"
+        } else if audio_manager
+            .sink
+            .as_ref()
+            .is_some_and(rodio::Sink::is_paused)
+        {
+            "Paused"
         } else {
-            #[cfg(feature = "audio")]
-            {
-                if audio_manager
-                    .sink
-                    .as_ref()
-                    .is_some_and(rodio::Sink::is_paused)
-                {
-                    "Paused"
-                } else {
-                    "Stopped/empty"
-                }
-            }
-            #[cfg(not(feature = "audio"))]
-            {
-                "Paused"
-            }
+            "Stopped/empty"
         };
         draw_text(
             &format!("Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"),
@@ -387,6 +523,108 @@ pub async fn main() -> anyhow::Result<()> {
                 YELLOW,
             );
         }
+
+        // -------- judgements --------
+        let mut right_y = 400.0;
+        for judgement in [
+            JudgementType::Marvelous,
+            JudgementType::Perfect,
+            JudgementType::Great,
+            JudgementType::Good,
+            JudgementType::Okay,
+            JudgementType::Miss,
+        ] {
+            let count = map.judgement_counts.get(&judgement).copied().unwrap_or(0);
+            draw_text(
+            &format!("{judgement}: {count}"),
+            screen_width() - 400.0,
+            right_y,
+            50.0,
+            WHITE,
+            );
+            right_y += line_height * 2.0;
+        }
+
+        // -------- judgement splash --------
+        let splash_length = 500.0; // duration of the splash effect in ms
+        if let Some((judgement, time, offset_ms)) = map.last_judgement {
+            let elapsed = audio_manager.get_current_song_time_ms() - time;
+            if elapsed < splash_length {
+                let alpha = (1.0 - (elapsed / splash_length)).clamp(0.0, 1.0);
+                let color = match judgement {
+                    JudgementType::Marvelous => WHITE,
+                    JudgementType::Perfect => GOLD,
+                    JudgementType::Great => GREEN,
+                    JudgementType::Good => BLUE,
+                    JudgementType::Okay => DARKGRAY,
+                    JudgementType::Miss => RED,
+                };
+                draw_text_ex(
+                    &judgement.to_string(),
+                    screen_width() / 2.0 - 100.0,
+                    screen_height() / 2.0,
+                    TextParams {
+                        font_size: 60,
+                        color: Color {
+                            r: color.r,
+                            g: color.g,
+                            b: color.b,
+                            a: alpha as f32,
+                        },
+                        ..Default::default()
+                    },
+                );
+                let offset = if offset_ms.abs() >= 1.0 {
+                    &format!("{offset_ms:+.0}")
+                } else {
+                    ""
+                };
+                draw_text_ex(
+                    offset,
+                    screen_width() / 2.0 - 50.0,
+                    screen_height() / 2.0 + 50.0,
+                    TextParams {
+                        font_size: 30,
+                        color: GRAY,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
+        // -------- combo --------
+        if map.combo > 0 {
+            draw_text(
+                &format!("{}", map.combo),
+                screen_width() / 2.0 - 10.0,
+                screen_height() / 2.0 - 200.0,
+                60.0,
+                WHITE,
+            );
+        }
+
+        // -------- accuracy --------
+        let mut points = 0.0;
+        let total_judgements = map.judgement_counts.values().sum::<usize>() as f64;
+        points += map.judgement_counts.get(&JudgementType::Marvelous).copied().unwrap_or(0) as f64 * 100.0;
+        points += map.judgement_counts.get(&JudgementType::Perfect).copied().unwrap_or(0) as f64   * 98.25;
+        points += map.judgement_counts.get(&JudgementType::Great).copied().unwrap_or(0) as f64     * 65.0;
+        points += map.judgement_counts.get(&JudgementType::Good).copied().unwrap_or(0) as f64      * 25.0;
+        points += map.judgement_counts.get(&JudgementType::Okay).copied().unwrap_or(0) as f64      * -100.0;
+        points += map.judgement_counts.get(&JudgementType::Miss).copied().unwrap_or(0) as f64      * -50.0;
+        let accuracy_display = if total_judgements <= 0.0 {
+            "100.00%".to_string()
+        } else {
+            format!("{:.2}%", (points / total_judgements).max(0.0))
+        };
+        draw_text(
+            &accuracy_display,
+            screen_width() - 300.0,
+            80.0,
+            80.0,
+            WHITE,
+        );
+
 
         next_frame().await;
     }

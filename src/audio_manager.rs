@@ -1,12 +1,10 @@
-// src/audio_manager.rs
-
+use crate::logger;
 use rodio::{source::Source as _, Decoder, OutputStream, OutputStreamHandle, Sink};
 use std::{fs::File, io::BufReader, path::PathBuf, time::Instant};
 
 const INITIAL_AUDIO_VOLUME: f64 = 0.03;
 const INITIAL_AUDIO_RATE: f64 = 1.0;
 
-/// Manages audio playback using the Rodio library.
 pub struct AudioManager {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
@@ -26,7 +24,7 @@ pub struct AudioManager {
 }
 
 impl AudioManager {
-    /// Creates a new `AudioManager` instance with an audio output stream and an initial sink.
+    // creates a new `AudioManager` instance with an audio output stream and an initial sink
     pub fn new() -> Result<Self, String> {
         let (stream, stream_handle) = OutputStream::try_default()
             .map_err(|e| format!("Failed to get audio output stream: {e}"))?;
@@ -57,7 +55,7 @@ impl AudioManager {
         })
     }
 
-    /// Sets the audio source path and verifies if the audio file is decodable.
+    // sets the audio source path and verifies if the audio file is decodable
     pub fn set_audio_path(&mut self, path: Option<PathBuf>) {
         self.audio_source_path = path;
         self.current_error = None;
@@ -72,11 +70,11 @@ impl AudioManager {
                         if let Some(duration) = decoder.total_duration() {
                             self.length = Some(duration.as_secs_f64() * 1000f64);
                         }
-                        log::info!(
+                        logger::info(&format!(
                             "Audio path set and verified decodable: {:?}, Duration: {:?} ms",
                             p.display(),
                             self.length
-                        );
+                        ));
                     }
                     Err(_) => {
                         self.current_error =
@@ -91,14 +89,14 @@ impl AudioManager {
         }
     }
 
-    /// Returns the current audio source path.
+    // returns the current audio source path
     fn load_and_append_to_sink(&mut self) -> bool {
         if let Some(s) = self.sink.as_mut() {
             if let Some(path) = &self.audio_source_path {
-                log::info!(
+                logger::info(&format!(
                     "Audiomanager: Attempting to load and append: {:?}",
                     path.display()
-                );
+                ));
                 match File::open(path) {
                     Ok(file) => match Decoder::new(BufReader::new(file)) {
                         Ok(source) => {
@@ -110,35 +108,35 @@ impl AudioManager {
                             }
                             s.append(source);
                             self.current_error = None;
-                            log::info!("Audiomanager: Audio loaded and appended to sink.");
+                            logger::info("Audiomanager: Audio loaded and appended to sink.");
                             return true;
                         }
                         Err(e) => {
                             let err_msg = format!("Audiomanager: Failed to decode audio: {e}");
-                            log::error!("{err_msg}");
+                            logger::error(&err_msg);
                             self.current_error = Some(err_msg);
                         }
                     },
                     Err(e) => {
                         let err_msg = format!("Audiomanager: Failed to open audio file: {e}");
-                        log::error!("{err_msg}");
+                        logger::error(&err_msg);
                         self.current_error = Some(err_msg);
                     }
                 }
             } else {
                 let err_msg = "Audiomanager: No audio source path to load.".to_string();
-                log::info!("{err_msg}");
+                logger::info(&err_msg);
                 self.current_error = Some(err_msg);
             }
         } else {
             let err_msg = "Audiomanager: No audio sink available to load into.".to_string();
-            log::info!("{err_msg}");
+            logger::info(&err_msg);
             self.current_error = Some(err_msg);
         }
         false
     }
 
-    /// Loads the audio file into the sink if not already loaded.
+    // loads the audio file into the sink if not already loaded
     pub fn play(&mut self) {
         let need_load = self.sink.as_ref().is_some_and(rodio::Sink::empty);
 
@@ -156,16 +154,16 @@ impl AudioManager {
                 self.playback_start_instant = Some(Instant::now());
                 self.playback_start_rate = self.rate;
                 self.is_audio_engine_paused = false;
-                log::info!("Audiomanager: Audio playing/resumed.");
+                logger::info("Audiomanager: Audio playing/resumed.");
             }
         } else {
             self.current_error = Some("Play called but no sink exists.".to_string());
-            log::info!("{}", self.current_error.as_ref().unwrap());
+            logger::info(&self.current_error.as_ref().unwrap().to_string());
             self.is_audio_engine_paused = true;
         }
     }
 
-    /// Pauses playback and records the elapsed time.
+    // pauses playback and records the elapsed time
     pub fn pause(&mut self) {
         if let Some(s) = self.sink.as_mut() {
             if !s.is_paused() {
@@ -175,15 +173,15 @@ impl AudioManager {
                         start_instant.elapsed().as_secs_f64() * 1000f64 * self.playback_start_rate;
                 }
                 self.is_audio_engine_paused = true;
-                log::info!(
+                logger::info(&format!(
                     "Audiomanager: Audio paused. Accumulated time: {} ms",
                     self.accumulated_play_time_ms
-                );
+                ));
             }
         }
     }
 
-    /// Stops the audio playback, clears the sink, and resets the state.
+    // stops the audio playback, clears the sink, and resets the state
     pub fn restart(&mut self) {
         self.accumulated_play_time_ms = 0f64;
         self.playback_start_instant = None;
@@ -193,7 +191,7 @@ impl AudioManager {
         if let Some(s) = self.sink.as_mut() {
             s.stop();
             s.clear();
-            log::info!("Audiomanager: Sink stopped and cleared for restart.");
+            logger::info("Audiomanager: Sink stopped and cleared for restart.");
         } else {
             match Sink::try_new(&self.stream_handle) {
                 Ok(new_sink) => {
@@ -201,11 +199,11 @@ impl AudioManager {
                     new_sink.set_speed(self.rate as f32);
                     new_sink.pause();
                     self.sink = Some(new_sink);
-                    log::info!("Audiomanager: New sink created on restart.");
+                    logger::info("Audiomanager: New sink created on restart.");
                 }
                 Err(e) => {
                     let err_msg = format!("Audiomanager: Failed to create sink on restart: {e}");
-                    log::error!("{err_msg}");
+                    logger::error(&err_msg);
                     self.current_error = Some(err_msg);
                 }
             }
@@ -213,10 +211,9 @@ impl AudioManager {
         // after restart, play() will handle loading and starting
     }
 
-    /// Seeks to the specified position in milliseconds.
-    ///
-    /// If audio was playing before the seek, playback will resume from the new
-    /// position. Otherwise, the sink remains paused.
+    // seeks to the specified position in milliseconds
+    // if audio was playing before the seek, playback will resume from the new
+    // position. Otherwise, the sink remains paused
     pub fn seek_ms(&mut self, ms: f64) {
         let target_ms = self.length.map_or(ms.max(0.0), |len| ms.clamp(0.0, len));
 
@@ -259,21 +256,21 @@ impl AudioManager {
                             }
                             Err(e) => {
                                 let err_msg = format!("Audiomanager: Failed to decode audio: {e}");
-                                log::error!("{err_msg}");
+                                logger::error(&err_msg);
                                 self.current_error = Some(err_msg);
                                 self.sink = Some(new_sink);
                             }
                         },
                         Err(e) => {
                             let err_msg = format!("Audiomanager: Failed to open audio file: {e}");
-                            log::error!("{err_msg}");
+                            logger::error(&err_msg);
                             self.current_error = Some(err_msg);
                             self.sink = Some(new_sink);
                         }
                     }
                 } else {
                     let err_msg = "Audiomanager: No audio source path to seek.".to_string();
-                    log::error!("{err_msg}");
+                    logger::error(&err_msg);
                     self.current_error = Some(err_msg);
                     new_sink.pause();
                     self.sink = Some(new_sink);
@@ -282,15 +279,14 @@ impl AudioManager {
             }
             Err(e) => {
                 let err_msg = format!("Audiomanager: Failed to create sink on seek: {e}");
-                log::error!("{err_msg}");
+                logger::error(&err_msg);
                 self.current_error = Some(err_msg);
                 self.is_audio_engine_paused = true;
             }
         }
     }
 
-
-    /// Returns the current playback time in milliseconds.
+    // returns the current playback time in milliseconds
     pub fn get_current_song_time_ms(&self) -> f64 {
         let mut current_time = self.accumulated_play_time_ms;
         if !self.is_audio_engine_paused {
@@ -305,7 +301,7 @@ impl AudioManager {
         })
     }
 
-    /// Returns whether the audio is currently playing.
+    // returns whether the audio is currently playing
     pub fn is_playing(&self) -> bool {
         !self.is_audio_engine_paused
             && self
@@ -314,26 +310,29 @@ impl AudioManager {
                 .is_some_and(|s| !s.empty() && !s.is_paused())
     }
 
-    /// Returns the duration of the audio file in milliseconds.
+    // returns the duration of the audio file in milliseconds
     pub const fn get_total_duration_ms(&self) -> Option<f64> {
         self.length
     }
 
-    /// Sets the volume of the audio playback.
+    // sets the volume of the audio playback
     pub fn set_volume(&mut self, volume: f64) {
         self.volume = volume.clamp(0.0, 1.5); // clamp volume
         if let Some(s) = self.sink.as_mut() {
             s.set_volume(self.volume as f32);
         }
-        log::info!("Audiomanager: Volume set to {}", self.volume);
+        logger::info(&format!(
+            "Audiomanager: Volume set to {}",
+            self.volume
+        ));
     }
 
-    /// Returns the current volume of the audio playback.
+    // returns the current volume of the audio playback
     pub const fn get_volume(&self) -> f64 {
         self.volume
     }
 
-    /// Sets the playback rate of the audio.
+    // sets the playback rate of the audio
     pub fn set_rate(&mut self, rate: f64) {
         self.rate = rate.max(0.1); // prevent rate from being too low or zero
         if let Some(s) = self.sink.as_mut() {
@@ -347,15 +346,18 @@ impl AudioManager {
             self.playback_start_instant = Some(Instant::now());
             self.playback_start_rate = self.rate;
         }
-        log::info!("Audiomanager: Rate set to {}", self.rate);
+        logger::info(&format!(
+            "Audiomanager: Rate set to {}",
+            self.rate
+        ));
     }
 
-    /// Returns the current playback rate of the audio.
+    // returns the current playback rate of the audio
     pub const fn get_rate(&self) -> f64 {
         self.rate
     }
 
-    /// Returns the current error message, if any.
+    // returns the current error message, if any
     pub const fn get_error(&self) -> Option<&String> {
         self.current_error.as_ref()
     }

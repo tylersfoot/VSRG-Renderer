@@ -1,7 +1,7 @@
-use crate::constants::{FieldPositions, BEAT_SNAPS, DEFAULT_TIMING_GROUP_ID, SKIN, TRACK_ROUNDING};
+use crate::utils::{FieldPositions, BEAT_SNAPS, DEFAULT_TIMING_GROUP_ID, SKIN, TRACK_ROUNDING, JUDGEMENTS, JudgementType, Judgement};
 use crate::{index_at_time, lerp, object_at_time, sort_by_start_time, HasStartTime, Time};
+use crate::logger;
 use anyhow::{bail, Result};
-use log::warn;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -13,9 +13,10 @@ pub type Position = i64;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Mods {
-    pub mirror: bool, // mirror notes horizontally
-    pub no_sv: bool,  // ignore scroll velocity
-    pub no_ssf: bool, // ignore scroll speed factor
+    pub mirror: bool,   // mirror notes horizontally
+    pub no_sv: bool,    // ignore scroll velocity
+    pub no_ssf: bool,   // ignore scroll speed factor
+    pub autoplay: bool, // autoplay mode
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -26,6 +27,8 @@ pub enum GameMode {
     Keys4,
     Keys7,
 }
+ 
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
@@ -85,6 +88,14 @@ pub struct Map {
     pub mods: Mods,
     #[serde(skip)]
     pub length: Time, // length of the map in ms
+    #[serde(skip)]
+    pub judgement_windows: HashMap<JudgementType, f64>, // hit window in ms
+    #[serde(skip)]
+    pub judgement_counts: HashMap<JudgementType, usize>, // count for each judgement
+    #[serde(skip)]
+    pub last_judgement: Option<(JudgementType, f64, f64)>, // last judgement (type, time, offset)
+    #[serde(skip)]
+    pub combo: usize, // current combo
 }
 
 impl Map {
@@ -145,18 +156,18 @@ impl Map {
         // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L161
         for hit_object in &mut self.hit_objects {
             let Some(group_id) = hit_object.timing_group.as_ref() else {
-                warn!(
+                logger::warning(&format!(
                     "Hit object at time {} has no timing group",
                     hit_object.start_time
-                );
+                ));
                 continue;
             };
 
             let Some(timing_group) = self.timing_groups.get_mut(group_id) else {
-                warn!(
+                logger::warning(&format!(
                     "Timing group '{}' not found for hit object at time {}",
                     group_id, hit_object.start_time
-                );
+                ));
                 continue;
             };
 
@@ -290,6 +301,14 @@ impl Map {
         for timing_group in self.timing_groups.values_mut() {
             sort_by_start_time(&mut timing_group.scroll_speed_factors);
         }
+
+        // init judgements with new values
+        self.judgement_windows = JUDGEMENTS.iter()
+            .map(|j| (j.kind, j.window))
+            .collect();
+        self.judgement_counts = JUDGEMENTS.iter()
+            .map(|j| (j.kind, 0))
+            .collect();
     }
 
     pub fn update_track_position(&mut self, time: Time) {
@@ -345,18 +364,18 @@ impl Map {
         // https://github.com/Quaver/Quaver/blob/develop/Quaver.Shared/Screens/Gameplay/Rulesets/Keys/HitObjects/GameplayHitObjectKeys.cs#L387
         for hit_object in &mut self.hit_objects {
             let Some(group_id) = hit_object.timing_group.as_ref() else {
-                warn!(
+                logger::warning(&format!(
                     "Hit object at time {} has no timing group",
                     hit_object.start_time
-                );
+                ));
                 continue;
             };
 
             let Some(timing_group) = self.timing_groups.get_mut(group_id) else {
-                warn!(
+                logger::warning(&format!(
                     "Timing group '{}' not found for hit object at time {}",
                     group_id, hit_object.start_time
-                );
+                ));
                 continue;
             };
 
@@ -410,6 +429,62 @@ impl Map {
             key_count + 1
         } else {
             key_count
+        }
+    }
+
+    pub fn handle_gameplay_key_press(&mut self, time: Time, mut lane: i64) {
+        // handles when one of the gameplay keys is pressed
+        if self.mods.autoplay {
+            // in autoplay mode, we don't do anything
+            return;
+        }
+        if self.mods.mirror {
+            lane = self.get_key_count(false) - lane; // mirror the lane
+        }
+
+        // hit window in ms - early up to miss, late up to okay (anything past is auto miss)
+        // earliest hit object in the window
+        let start_index = index_at_time(&self.hit_objects, time - self.judgement_windows[&JudgementType::Okay])
+            .unwrap_or(self.hit_objects.len() - 1);
+        // last hit object in the window
+        let end_index = index_at_time(&self.hit_objects, time + self.judgement_windows[&JudgementType::Miss])
+            .unwrap_or(self.hit_objects.len() - 1);
+
+        // loop through hit objects in the window
+        for index in start_index..=end_index {
+            let hit_object = &mut self.hit_objects[index];
+            if hit_object.lane != lane || hit_object.hit {
+                // not the right lane or already hit
+                continue;
+            }
+
+            // double check if the hit object is within the hit window
+            let distance = hit_object.start_time - time;
+            if distance.abs() <= self.judgement_windows[&JudgementType::Miss] {
+                // calculate judgement type based on distance from start time
+                let judgement_type = match distance.abs() {
+                    d if d <= self.judgement_windows[&JudgementType::Marvelous] => JudgementType::Marvelous,
+                    d if d <= self.judgement_windows[&JudgementType::Perfect] => JudgementType::Perfect,
+                    d if d <= self.judgement_windows[&JudgementType::Great] => JudgementType::Great,
+                    d if d <= self.judgement_windows[&JudgementType::Good] => JudgementType::Good,
+                    d if d <= self.judgement_windows[&JudgementType::Okay] => JudgementType::Okay,
+                    _ => JudgementType::Miss,
+                };
+
+                if judgement_type == JudgementType::Miss {
+                    self.combo = 0; // reset combo on miss
+                } else {
+                    self.combo += 1;
+                }
+
+                // increment judgement count
+                *self.judgement_counts.get_mut(&judgement_type).unwrap() += 1;
+                hit_object.hit = true; // mark as hit
+                let offset_decimals = 0;
+                let offset = (distance * 10f64.powi(offset_decimals)).round() / 10f64.powi(offset_decimals);
+                self.last_judgement = Some((judgement_type, time, offset)); // update last judgement
+                return; // exit after hitting the first valid hit object
+            }
         }
     }
 }
@@ -490,6 +565,8 @@ pub struct HitObject {
     pub position_tail: Position, // live position of the LN end
     #[serde(skip)]
     pub previous_positions: VecDeque<Position>, // previous positions, used for rendering effects
+    #[serde(skip)]
+    pub hit: bool, // whether this object has been hit
 }
 
 // public virtual float CurrentLongNoteBodySize => (LatestHeldPosition - EarliestHeldPosition) *
