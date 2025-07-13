@@ -17,6 +17,8 @@ pub struct Mods {
     pub no_sv: bool,    // ignore scroll velocity
     pub no_ssf: bool,   // ignore scroll speed factor
     pub autoplay: bool, // autoplay mode
+    pub debug: bool,    // enable debug text
+    pub no_ui: bool,    // disable UI elements
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -379,7 +381,7 @@ impl Map {
                 continue;
             };
 
-            while hit_object.previous_positions.len() < 10 {
+            while hit_object.previous_positions.len() < 50 {
                 // ensure we have at least 10 previous positions
                 hit_object
                     .previous_positions
@@ -389,7 +391,7 @@ impl Map {
             hit_object
                 .previous_positions
                 .push_front(hit_object.position);
-            if hit_object.previous_positions.len() > 10 {
+            if hit_object.previous_positions.len() > 50 {
                 hit_object.previous_positions.pop_back();
             }
 
@@ -434,10 +436,6 @@ impl Map {
 
     pub fn handle_gameplay_key_press(&mut self, time: Time, mut lane: i64) {
         // handles when one of the gameplay keys is pressed
-        if self.mods.autoplay {
-            // in autoplay mode, we don't do anything
-            return;
-        }
         if self.mods.mirror {
             lane = self.get_key_count(false) - lane; // mirror the lane
         }

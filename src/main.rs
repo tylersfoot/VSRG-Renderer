@@ -46,6 +46,10 @@ struct CliArgs {
     no_ssf: bool,     // ignore scroll speed factors
     #[arg(long)]
     autoplay: bool,   // autoplay mode
+    #[arg(long)]
+    debug: bool,      // enable debug text
+    #[arg(long)]
+    no_ui: bool,      // disable UI elements
 }
 
 fn window_conf() -> Conf {
@@ -120,9 +124,12 @@ pub async fn main() -> anyhow::Result<()> {
     map.mods.no_sv = args.no_sv;
     map.mods.no_ssf = args.no_ssf;
     map.mods.autoplay = args.autoplay;
+    map.mods.debug = args.debug;
+    map.mods.no_ui = args.no_ui;
 
     // map processing functions / preload
-    let field_positions = set_reference_positions();
+    let receptor_texture: Texture2D = load_texture("skins/receptor.png").await.unwrap();
+    let field_positions = set_reference_positions(&receptor_texture);
     map.initialize_default_timing_group();
     map.sort();
     map.initialize_control_points();
@@ -374,19 +381,20 @@ pub async fn main() -> anyhow::Result<()> {
         }
 
         // gameplay keybinds
-        if is_key_pressed(KeyCode::A) {
-            map.handle_gameplay_key_press(map.time, 0);
+        if !map.mods.autoplay {
+            if is_key_pressed(KeyCode::A) {
+                map.handle_gameplay_key_press(map.time, 0);
+            }
+            if is_key_pressed(KeyCode::S) {
+                map.handle_gameplay_key_press(map.time, 1);
+            }
+            if is_key_pressed(KeyCode::Semicolon) {
+                map.handle_gameplay_key_press(map.time, 2);
+            }
+            if is_key_pressed(KeyCode::Apostrophe) {
+                map.handle_gameplay_key_press(map.time, 3);
+            }
         }
-        if is_key_pressed(KeyCode::S) {
-            map.handle_gameplay_key_press(map.time, 1);
-        }
-        if is_key_pressed(KeyCode::Semicolon) {
-            map.handle_gameplay_key_press(map.time, 2);
-        }
-        if is_key_pressed(KeyCode::Apostrophe) {
-            map.handle_gameplay_key_press(map.time, 3);
-        }
-
 
         let mut macroquad_draw = MacroquadDraw;
         let mut frame_state = FrameState {
@@ -403,227 +411,230 @@ pub async fn main() -> anyhow::Result<()> {
         })?;
 
         // -------- draw ui / debug info --------
-
-        let mut y_offset = 20.0;
         let line_height = 20.0;
+        if map.mods.debug {
+            let mut y_offset = 20.0;
 
-        if let (Some(title), Some(artist), Some(difficulty), Some(creator)) = (
-            map.title.as_ref(),
-            map.artist.as_ref(),
-            map.difficulty_name.as_ref(),
-            map.creator.as_ref(),
-        ) {
+            if let (Some(title), Some(artist), Some(difficulty), Some(creator)) = (
+                map.title.as_ref(),
+                map.artist.as_ref(),
+                map.difficulty_name.as_ref(),
+                map.creator.as_ref(),
+            ) {
+                draw_text(
+                    &format!("Map: {title} - {artist} [{difficulty}] by {creator}"),
+                    10.0,
+                    y_offset,
+                    20.0,
+                    WHITE,
+                );
+                y_offset += line_height;
+            }
+
             draw_text(
-                &format!("Map: {title} - {artist} [{difficulty}] by {creator}"),
+                &format!(
+                    "{total_hit_objects} Notes, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Groups, {total_timing_points} Timing Points, {total_timing_lines} Timing Lines",
+                ),
                 10.0,
                 y_offset,
                 20.0,
                 WHITE,
             );
             y_offset += line_height;
-        }
+            y_offset += line_height;
 
-        draw_text(
-            &format!(
-                "{total_hit_objects} Notes, {total_svs} SVs, {total_ssfs} SSFs, {total_timing_groups} Groups, {total_timing_points} Timing Points, {total_timing_lines} Timing Lines",
-            ),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
-        y_offset += line_height;
-
-        let visual_state_text = if is_playing_visuals {
-            "Playing"
-        } else {
-            "Paused"
-        };
-        let audio_actual_state_text = if audio_manager.is_playing() {
-            "Playing"
-        } else if audio_manager
-            .sink
-            .as_ref()
-            .is_some_and(rodio::Sink::is_paused)
-        {
-            "Paused"
-        } else {
-            "Stopped/empty"
-        };
-        draw_text(
-            &format!("Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
-
-        draw_text(
-            &format!(
-                "Volume: {:.2} (up/down) | Rate: {:.1}x (left/right)",
-                audio_manager.get_volume(),
-                audio_manager.get_rate()
-            ),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
-
-        let total_duration_str = match audio_manager.get_total_duration_ms() {
-            Some(d) => format!("{:.2}s", d / 1000f64),
-            
-            None => "N/A".to_string(),
-        };
-        draw_text(
-            &format!("Time: {:.2}s / {}", time / 1000f64, total_duration_str),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
-
-        let fps = format!("{:<3}", get_fps());
-        let elapsed = start_instant.elapsed().as_secs_f64();
-        let avg_fps = if elapsed > 0f64 {
-            frame_count as f64 / elapsed
-        } else {
-            0f64
-        };
-        draw_text(
-            &format!("FPS: {fps} | {avg_fps:.2}"),
-            10.0,
-            y_offset,
-            20.0,
-            WHITE,
-        );
-        y_offset += line_height;
-
-        if let Some(err_msg) = audio_manager.get_error() {
+            let visual_state_text = if is_playing_visuals {
+                "Playing"
+            } else {
+                "Paused"
+            };
+            let audio_actual_state_text = if audio_manager.is_playing() {
+                "Playing"
+            } else if audio_manager
+                .sink
+                .as_ref()
+                .is_some_and(rodio::Sink::is_paused)
+            {
+                "Paused"
+            } else {
+                "Stopped/empty"
+            };
             draw_text(
-                &format!("Audio status: {err_msg}"),
+                &format!("Visuals: {visual_state_text} | Audio: {audio_actual_state_text} (space, r)"),
                 10.0,
                 y_offset,
-                18.0,
-                YELLOW,
+                20.0,
+                WHITE,
             );
-        } else if audio_manager.audio_source_path.is_none() && map.audio_file.is_some() {
+            y_offset += line_height;
+
             draw_text(
                 &format!(
-                    "Audio status: no path set for '{}'",
-                    map.audio_file.as_ref().unwrap()
+                    "Volume: {:.2} (up/down) | Rate: {:.1}x (left/right)",
+                    audio_manager.get_volume(),
+                    audio_manager.get_rate()
                 ),
                 10.0,
                 y_offset,
-                18.0,
-                YELLOW,
+                20.0,
+                WHITE,
             );
-        }
+            y_offset += line_height;
 
-        // -------- judgements --------
-        let mut right_y = 400.0;
-        for judgement in [
-            JudgementType::Marvelous,
-            JudgementType::Perfect,
-            JudgementType::Great,
-            JudgementType::Good,
-            JudgementType::Okay,
-            JudgementType::Miss,
-        ] {
-            let count = map.judgement_counts.get(&judgement).copied().unwrap_or(0);
+            let total_duration_str = match audio_manager.get_total_duration_ms() {
+                Some(d) => format!("{:.2}s", d / 1000f64),
+                
+                None => "N/A".to_string(),
+            };
             draw_text(
-            &format!("{judgement}: {count}"),
-            screen_width() - 400.0,
-            right_y,
-            50.0,
-            WHITE,
+                &format!("Time: {:.2}s / {}", time / 1000f64, total_duration_str),
+                10.0,
+                y_offset,
+                20.0,
+                WHITE,
             );
-            right_y += line_height * 2.0;
-        }
+            y_offset += line_height;
 
-        // -------- judgement splash --------
-        let splash_length = 500.0; // duration of the splash effect in ms
-        if let Some((judgement, time, offset_ms)) = map.last_judgement {
-            let elapsed = audio_manager.get_current_song_time_ms() - time;
-            if elapsed < splash_length {
-                let alpha = (1.0 - (elapsed / splash_length)).clamp(0.0, 1.0);
-                let color = match judgement {
-                    JudgementType::Marvelous => WHITE,
-                    JudgementType::Perfect => GOLD,
-                    JudgementType::Great => GREEN,
-                    JudgementType::Good => BLUE,
-                    JudgementType::Okay => DARKGRAY,
-                    JudgementType::Miss => RED,
-                };
-                draw_text_ex(
-                    &judgement.to_string(),
-                    screen_width() / 2.0 - 100.0,
-                    screen_height() / 2.0,
-                    TextParams {
-                        font_size: 60,
-                        color: Color {
-                            r: color.r,
-                            g: color.g,
-                            b: color.b,
-                            a: alpha as f32,
-                        },
-                        ..Default::default()
-                    },
+            let fps = format!("{:<3}", get_fps());
+            let elapsed = start_instant.elapsed().as_secs_f64();
+            let avg_fps = if elapsed > 0f64 {
+                frame_count as f64 / elapsed
+            } else {
+                0f64
+            };
+            draw_text(
+                &format!("FPS: {fps} | {avg_fps:.2}"),
+                10.0,
+                y_offset,
+                20.0,
+                WHITE,
+            );
+            y_offset += line_height;
+
+            if let Some(err_msg) = audio_manager.get_error() {
+                draw_text(
+                    &format!("Audio status: {err_msg}"),
+                    10.0,
+                    y_offset,
+                    18.0,
+                    YELLOW,
                 );
-                let offset = if offset_ms.abs() >= 1.0 {
-                    &format!("{offset_ms:+.0}")
-                } else {
-                    ""
-                };
-                draw_text_ex(
-                    offset,
-                    screen_width() / 2.0 - 50.0,
-                    screen_height() / 2.0 + 50.0,
-                    TextParams {
-                        font_size: 30,
-                        color: GRAY,
-                        ..Default::default()
-                    },
+            } else if audio_manager.audio_source_path.is_none() && map.audio_file.is_some() {
+                draw_text(
+                    &format!(
+                        "Audio status: no path set for '{}'",
+                        map.audio_file.as_ref().unwrap()
+                    ),
+                    10.0,
+                    y_offset,
+                    18.0,
+                    YELLOW,
                 );
             }
         }
 
-        // -------- combo --------
-        if map.combo > 0 {
+        if !map.mods.no_ui {
+            // -------- judgements --------
+            let mut right_y = 400.0;
+            for judgement in [
+                JudgementType::Marvelous,
+                JudgementType::Perfect,
+                JudgementType::Great,
+                JudgementType::Good,
+                JudgementType::Okay,
+                JudgementType::Miss,
+            ] {
+                let count = map.judgement_counts.get(&judgement).copied().unwrap_or(0);
+                draw_text(
+                &format!("{judgement}: {count}"),
+                screen_width() - 400.0,
+                right_y,
+                50.0,
+                WHITE,
+                );
+                right_y += line_height * 2.0;
+            }
+
+            // -------- judgement splash --------
+            let splash_length = 500.0; // duration of the splash effect in ms
+            if let Some((judgement, time, offset_ms)) = map.last_judgement {
+                let elapsed = audio_manager.get_current_song_time_ms() - time;
+                if elapsed < splash_length {
+                    let alpha = (1.0 - (elapsed / splash_length)).clamp(0.0, 1.0);
+                    let color = match judgement {
+                        JudgementType::Marvelous => WHITE,
+                        JudgementType::Perfect => GOLD,
+                        JudgementType::Great => GREEN,
+                        JudgementType::Good => BLUE,
+                        JudgementType::Okay => DARKGRAY,
+                        JudgementType::Miss => RED,
+                    };
+                    draw_text_ex(
+                        &judgement.to_string(),
+                        screen_width() / 2.0 - 100.0,
+                        screen_height() / 2.0,
+                        TextParams {
+                            font_size: 60,
+                            color: Color {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                                a: alpha as f32,
+                            },
+                            ..Default::default()
+                        },
+                    );
+                    let offset = if offset_ms.abs() >= 1.0 {
+                        &format!("{offset_ms:+.0}")
+                    } else {
+                        ""
+                    };
+                    draw_text_ex(
+                        offset,
+                        screen_width() / 2.0 - 50.0,
+                        screen_height() / 2.0 + 50.0,
+                        TextParams {
+                            font_size: 30,
+                            color: GRAY,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+
+            // -------- combo --------
+            if map.combo > 0 {
+                draw_text(
+                    &format!("{}", map.combo),
+                    screen_width() / 2.0 - 10.0,
+                    screen_height() / 2.0 - 200.0,
+                    60.0,
+                    WHITE,
+                );
+            }
+
+            // -------- accuracy --------
+            let mut points = 0.0;
+            let total_judgements = map.judgement_counts.values().sum::<usize>() as f64;
+            points += map.judgement_counts.get(&JudgementType::Marvelous).copied().unwrap_or(0) as f64 * 100.0;
+            points += map.judgement_counts.get(&JudgementType::Perfect).copied().unwrap_or(0) as f64   * 98.25;
+            points += map.judgement_counts.get(&JudgementType::Great).copied().unwrap_or(0) as f64     * 65.0;
+            points += map.judgement_counts.get(&JudgementType::Good).copied().unwrap_or(0) as f64      * 25.0;
+            points += map.judgement_counts.get(&JudgementType::Okay).copied().unwrap_or(0) as f64      * -100.0;
+            points += map.judgement_counts.get(&JudgementType::Miss).copied().unwrap_or(0) as f64      * -50.0;
+            let accuracy_display = if total_judgements <= 0.0 {
+                "100.00%".to_string()
+            } else {
+                format!("{:.2}%", (points / total_judgements).max(0.0))
+            };
             draw_text(
-                &format!("{}", map.combo),
-                screen_width() / 2.0 - 10.0,
-                screen_height() / 2.0 - 200.0,
-                60.0,
+                &accuracy_display,
+                screen_width() - 300.0,
+                80.0,
+                80.0,
                 WHITE,
             );
         }
-
-        // -------- accuracy --------
-        let mut points = 0.0;
-        let total_judgements = map.judgement_counts.values().sum::<usize>() as f64;
-        points += map.judgement_counts.get(&JudgementType::Marvelous).copied().unwrap_or(0) as f64 * 100.0;
-        points += map.judgement_counts.get(&JudgementType::Perfect).copied().unwrap_or(0) as f64   * 98.25;
-        points += map.judgement_counts.get(&JudgementType::Great).copied().unwrap_or(0) as f64     * 65.0;
-        points += map.judgement_counts.get(&JudgementType::Good).copied().unwrap_or(0) as f64      * 25.0;
-        points += map.judgement_counts.get(&JudgementType::Okay).copied().unwrap_or(0) as f64      * -100.0;
-        points += map.judgement_counts.get(&JudgementType::Miss).copied().unwrap_or(0) as f64      * -50.0;
-        let accuracy_display = if total_judgements <= 0.0 {
-            "100.00%".to_string()
-        } else {
-            format!("{:.2}%", (points / total_judgements).max(0.0))
-        };
-        draw_text(
-            &accuracy_display,
-            screen_width() - 300.0,
-            80.0,
-            80.0,
-            WHITE,
-        );
 
 
         next_frame().await;

@@ -1,5 +1,4 @@
-
-use macroquad::color::Color;
+use macroquad::{color::Color, prelude::*};
 use std::fmt;
 // use serde::{Deserialize, Serialize};
 
@@ -10,11 +9,12 @@ pub const DEFAULT_TIMING_GROUP_ID: &str = "$Default";
 pub const TRACK_ROUNDING: f64 = 100.0;
 
 #[derive(Debug, Clone)]
-pub struct FieldPositions {
+pub struct FieldPositions<'a> {
     // positions from top of screen
     pub receptor_position_y: f64,    // receptors position
     pub hit_position_y: f64,         // hit object target position
     pub timing_line_position_y: f64, // timing line position
+    pub receptor_texture: &'a Texture2D, // receptor texture
 }
 
 pub struct BeatSnap {
@@ -91,7 +91,7 @@ impl fmt::Display for JudgementType {
             JudgementType::Okay => "Okay",
             JudgementType::Miss => "Miss",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 

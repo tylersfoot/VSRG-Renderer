@@ -3,18 +3,19 @@ use crate::draw::Draw;
 use crate::map::Map;
 // use crate::index_at_time;
 use anyhow::Result;
-use macroquad::color::*;
+use macroquad::{color::Color, prelude::*};
 
 pub struct FrameState<'map> {
     pub map: &'map mut Map,
-    pub field_positions: &'map FieldPositions,
+    pub field_positions: &'map FieldPositions<'map>,
 }
 
-pub fn set_reference_positions() -> FieldPositions {
+pub fn set_reference_positions(receptor_texture: &'_ Texture2D) -> FieldPositions<'_> {
     let mut field_positions = FieldPositions {
         receptor_position_y: 0.0,
         hit_position_y: 0.0,
         timing_line_position_y: 0.0,
+        receptor_texture,
     };
 
     if SKIN.downscroll {
@@ -53,14 +54,20 @@ pub fn render_frame(state: &mut FrameState, draw: &mut impl Draw) -> Result<()> 
     // receptors (above notes)
     match SKIN.note_shape {
         "bars" => {
-            draw.draw_line(
+            // draw.draw_line(
+            //     0.0,
+            //     window_height + state.field_positions.receptor_position_y,
+            //     window_width,
+            //     window_height + state.field_positions.receptor_position_y,
+            //     3.0,
+            //     GRAY,
+            // );
+            draw.draw_texture(
+                state.field_positions.receptor_texture,
                 0.0,
-                window_height + state.field_positions.receptor_position_y,
-                window_width,
-                window_height + state.field_positions.receptor_position_y,
-                3.0,
-                GRAY,
-            );
+                window_height + state.field_positions.receptor_position_y * 1.88,
+                WHITE,
+            )
         }
         "circles" => {
             for i in 0i32..4i32 {
